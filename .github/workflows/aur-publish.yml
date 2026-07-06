@@ -1,0 +1,76 @@
+name: Publish to AUR
+
+# Fires on a version tag (v0.7.3, v0.8.0, ...) or by hand from the Actions tab.
+# No-ops cleanly until the AUR_SSH_PRIVATE_KEY secret is set, so it won't show a
+# red failure while you're still waiting on an AUR account.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish, e.g. v0.7.3'
+        required: true
+  workflow_call:                 # invoked by release.yml after it creates the tag
+    inputs:
+      tag:
+        description: 'Tag to publish, e.g. v0.7.3'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  aur:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Is the AUR key configured?
+        id: gate
+        env:
+          KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "AUR_SSH_PRIVATE_KEY not set — skipping AUR publish."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.go == 'true'
+
+      - name: Pin version + checksum from the tag
+        id: prep
+        if: steps.gate.outputs.go == 'true'
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}    # via env, never inlined into the script
+        run: |
+          set -euo pipefail
+          tag="$TAG"
+          ver="${tag#v}"
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${tag}.tar.gz"
+          echo "Hashing release tarball: $url"
+          sum=$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)
+          cd packaging/aur
+          sed -i "s/^pkgver=.*/pkgver=${ver}/"             PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/"                  PKGBUILD
+          sed -i "s|^sha256sums=.*|sha256sums=('${sum}')|" PKGBUILD
+          echo "ver=${ver}" >> "$GITHUB_OUTPUT"
+          echo "----- PKGBUILD to be published -----"
+          cat PKGBUILD
+
+      - name: Publish to the AUR
+        if: steps.gate.outputs.go == 'true'
+        uses: KSXGitHub/github-actions-deploy-aur@v2.7.2
+        with:
+          pkgname: dockswain
+          pkgbuild: ./packaging/aur/PKGBUILD
+          commit_username: Serhan Aydinicen
+          commit_email: saydinicen9@gmail.com
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ steps.prep.outputs.ver }}"
+          ssh_keyscan_types: rsa,ecdsa,ed25519
+          # flip to true to also test-build in a clean chroot (slower: pulls plasma deps)
+          test: false
