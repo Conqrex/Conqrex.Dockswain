@@ -2,7 +2,7 @@
 
 pkgname=dockswain
 _id=com.conqrex.dockswain
-pkgver=0.8.6
+pkgver=0.8.7
 pkgrel=1
 pkgdesc='KDE Plasma 6 fleet health and Docker management widget over SSH'
 arch=('any')
