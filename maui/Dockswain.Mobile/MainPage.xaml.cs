@@ -9,6 +9,7 @@ public partial class MainPage : ContentPage
 {
     private enum Feature
     {
+        Fleet,
         Containers,
         Compose,
         Disk,
@@ -28,10 +29,11 @@ public partial class MainPage : ContentPage
 
     private readonly Dictionary<Feature, Button> _tabButtons = [];
     private readonly IDispatcherTimer? _refreshTimer;
+    private readonly IDispatcherTimer? _fleetTimer;
 
     private List<ServerProfile> _servers = [];
     private ServerProfile? _server;
-    private Feature _feature = Feature.Containers;
+    private Feature _feature = Feature.Fleet;
     private bool _loadingServers;
     private bool _runningOnly = true;
     private bool _groupByNetwork;
@@ -43,6 +45,11 @@ public partial class MainPage : ContentPage
     private DiskSnapshot? _disk;
     private List<RemoteFileEntry> _files = [];
     private NginxSnapshot? _nginx;
+    private Dictionary<string, FleetHostSnapshot> _fleetSnapshots = [];
+    private List<FleetEvent> _fleetEvents = [];
+    private bool _fleetLoaded;
+    private bool _fleetRefreshing;
+    private DateTimeOffset _lastFleetDeep = DateTimeOffset.MinValue;
 
     public MainPage()
     {
@@ -60,6 +67,12 @@ public partial class MainPage : ContentPage
                 await SafeAsync(RefreshContainersAsync, showBusy: false);
             }
         };
+        _fleetTimer = Dispatcher.CreateTimer();
+        _fleetTimer.Interval = TimeSpan.FromSeconds(FleetRefreshSeconds);
+        _fleetTimer.Tick += async (_, _) =>
+        {
+            if (!_fleetRefreshing) await SafeAsync(RefreshFleetAsync, showBusy: false);
+        };
 
         Loaded += async (_, _) => await SafeAsync(LoadServersAsync);
     }
@@ -68,11 +81,13 @@ public partial class MainPage : ContentPage
     {
         base.OnAppearing();
         _refreshTimer?.Start();
+        _fleetTimer?.Start();
     }
 
     protected override void OnDisappearing()
     {
         _refreshTimer?.Stop();
+        _fleetTimer?.Stop();
         base.OnDisappearing();
     }
 
@@ -171,6 +186,12 @@ public partial class MainPage : ContentPage
 
     private async Task LoadServersAsync()
     {
+        if (!_fleetLoaded)
+        {
+            _fleetEvents = await _settings.LoadFleetEventsAsync();
+            _fleetSnapshots = await _settings.LoadFleetSnapshotsAsync();
+            _fleetLoaded = true;
+        }
         _loadingServers = true;
         var previousId = _server?.Id;
         _servers = await _settings.LoadServersAsync();
@@ -238,6 +259,12 @@ public partial class MainPage : ContentPage
             return;
         }
 
+        if (_feature == Feature.Fleet)
+        {
+            await RefreshFleetAsync();
+            return;
+        }
+
         if (_server is null)
         {
             RenderEmpty("No server configured", "Open Settings and add an SSH target.");
@@ -270,6 +297,143 @@ public partial class MainPage : ContentPage
         }
     }
 
+    private int FleetRefreshSeconds => Math.Max(10, Preferences.Default.Get("dockswain.fleet.refresh", 30));
+    private int FleetDeepSeconds => Math.Max(300, Preferences.Default.Get("dockswain.fleet.deep", 900));
+    private int FleetCpuThreshold => Preferences.Default.Get("dockswain.fleet.cpu", 85);
+    private int FleetMemoryThreshold => Preferences.Default.Get("dockswain.fleet.memory", 85);
+    private int FleetDiskThreshold => Preferences.Default.Get("dockswain.fleet.disk", 85);
+    private int FleetSslDays => Preferences.Default.Get("dockswain.fleet.sslDays", 14);
+    private int FleetRestartThreshold => Preferences.Default.Get("dockswain.fleet.restartCount", 3);
+    private int FleetRestartWindow => Preferences.Default.Get("dockswain.fleet.restartWindow", 60);
+    private bool FleetResources => Preferences.Default.Get("dockswain.fleet.resources", true);
+    private bool FleetDisk => Preferences.Default.Get("dockswain.fleet.diskEnabled", true);
+    private bool FleetSsl => Preferences.Default.Get("dockswain.fleet.sslEnabled", true);
+    private bool FleetImages => Preferences.Default.Get("dockswain.fleet.images", true);
+
+    private async Task RefreshFleetAsync()
+    {
+        if (_fleetRefreshing) return;
+        _fleetRefreshing = true;
+        try
+        {
+            var deep = DateTimeOffset.Now - _lastFleetDeep >= TimeSpan.FromSeconds(FleetDeepSeconds);
+            var samples = await Task.WhenAll(_servers.Select(s => _backend.FleetHealthAsync(s, FleetResources)));
+            if (deep)
+            {
+                await Task.WhenAll(samples.Select(async snapshot =>
+                {
+                    if (!snapshot.Reachable) return;
+                    var server = _servers.FirstOrDefault(s => s.Id == snapshot.ServerId);
+                    if (server is null) return;
+                    if (FleetDisk)
+                    {
+                        try { snapshot.Disk = await _backend.DiskAsync(server); } catch { }
+                    }
+                    if (FleetSsl)
+                    {
+                        try { snapshot.Certificates = await _backend.CertbotListAsync(server); } catch { }
+                    }
+                    snapshot.MetaSampledAt = DateTimeOffset.Now;
+                }));
+                _lastFleetDeep = DateTimeOffset.Now;
+            }
+
+            foreach (var sample in samples)
+            {
+                _fleetSnapshots.TryGetValue(sample.ServerId, out var old);
+                if (!deep && old is not null)
+                {
+                    sample.Disk = old.Disk;
+                    sample.Certificates = old.Certificates;
+                    sample.MetaSampledAt = old.MetaSampledAt;
+                }
+                if (old is not null) DetectFleetTransitions(old, sample, deep && sample.MetaSampledAt.HasValue);
+                _fleetSnapshots[sample.ServerId] = sample;
+            }
+            var valid = _servers.Select(s => s.Id).ToHashSet(StringComparer.Ordinal);
+            foreach (var removed in _fleetSnapshots.Keys.Where(k => !valid.Contains(k)).ToList()) _fleetSnapshots.Remove(removed);
+            await _settings.SaveFleetSnapshotsAsync(_fleetSnapshots);
+            if (_feature == Feature.Fleet) RenderFleet();
+            var issues = FleetIssues();
+            SetStatus($"Fleet: {_fleetSnapshots.Values.Count(s => s.Reachable)}/{_servers.Count} hosts online · {issues.Count} problem(s)");
+        }
+        finally { _fleetRefreshing = false; }
+    }
+
+    private void DetectFleetTransitions(FleetHostSnapshot old, FleetHostSnapshot current, bool metaObserved)
+    {
+        if (old.Reachable && !current.Reachable) AddFleetEvent("host_offline", "critical", current, null, $"{current.ServerLabel} is offline", current.Reason);
+        else if (!old.Reachable && current.Reachable) AddFleetEvent("host_online", "ok", current, null, $"{current.ServerLabel} is back online", "SSH connection recovered");
+        if (old.Reachable && old.DockerOk && current.Reachable && !current.DockerOk) AddFleetEvent("docker_unavailable", "critical", current, null, $"Docker unavailable on {current.ServerLabel}", current.Reason);
+        else if (old.Reachable && !old.DockerOk && current.DockerOk) AddFleetEvent("docker_recovered", "ok", current, null, $"Docker recovered on {current.ServerLabel}", "Docker is responding again");
+        if (metaObserved && FleetDisk && old.Disk is not null && current.Disk is not null)
+            DetectFleetThreshold(Percent(old.Disk.Disk.UsePercent), Percent(current.Disk.Disk.UsePercent), FleetDiskThreshold, "disk", "Disk", current, null);
+        if (metaObserved && FleetSsl)
+        {
+            var oldCerts = old.Certificates.ToDictionary(c => c.Name, StringComparer.Ordinal);
+            var previousSample = old.MetaSampledAt ?? old.SampledAt;
+            foreach (var cert in current.Certificates)
+            {
+                if (!oldCerts.TryGetValue(cert.Name, out var prior)) continue;
+                var beforeDays = CertificateDays(prior.Expiry, previousSample); var days = CertificateDays(cert.Expiry);
+                if (beforeDays > FleetSslDays && days <= FleetSslDays) AddFleetEvent("ssl_expiring", days < 0 ? "critical" : "warning", current, null, $"Certificate expiring: {cert.Domains}", days < 0 ? $"Expired {-days} days ago" : $"{days} days remaining");
+                else if (beforeDays <= FleetSslDays && days > FleetSslDays) AddFleetEvent("ssl_recovered", "ok", current, null, $"Certificate renewed: {cert.Domains}", $"{days} days remaining");
+            }
+        }
+        if (!old.DockerOk || !current.DockerOk) return;
+
+        var before = old.Containers.ToDictionary(c => c.Id, StringComparer.Ordinal);
+        var now = current.Containers.ToDictionary(c => c.Id, StringComparer.Ordinal);
+        foreach (var (id, container) in now)
+        {
+            if (!before.TryGetValue(id, out var prior))
+            {
+                AddFleetEvent("container_created", "info", current, container, $"{container.CleanName} was created", container.ImageReference);
+                continue;
+            }
+            var delta = Math.Max(0, container.RestartCount - prior.RestartCount);
+            if (delta > 0) AddFleetEvent("container_restart", "warning", current, container, $"{container.CleanName} restarted", $"{delta} new restart(s)", delta);
+            if (container.IsLive && prior.HealthValue != "unhealthy" && container.HealthValue == "unhealthy") AddFleetEvent("container_unhealthy", "critical", current, container, $"{container.CleanName} became unhealthy", container.Status);
+            else if (prior.HealthValue == "unhealthy" && container.HealthValue != "unhealthy" && container.IsRunning) AddFleetEvent("container_recovered", "ok", current, container, $"{container.CleanName} recovered", container.Status);
+            if (prior.StateValue != "restarting" && container.StateValue == "restarting") AddFleetEvent("container_restarting", "warning", current, container, $"{container.CleanName} is restarting", container.Status);
+            if (prior.IsLive && !container.IsLive) AddFleetEvent(container.ExitCode == 0 ? "container_stopped" : "container_crashed", container.ExitCode == 0 ? "warning" : "critical", current, container, container.ExitCode == 0 ? $"{container.CleanName} stopped" : $"{container.CleanName} crashed", container.Status);
+            else if (!prior.IsLive && container.IsLive) AddFleetEvent("container_started", "info", current, container, $"{container.CleanName} started", container.Status);
+            if (FleetResources)
+            {
+                if (!string.IsNullOrWhiteSpace(prior.Cpu) && !string.IsNullOrWhiteSpace(container.Cpu))
+                    DetectFleetThreshold(prior.CpuPercent, container.CpuPercent, FleetCpuThreshold, "container_cpu", "CPU", current, container);
+                if (!string.IsNullOrWhiteSpace(prior.Memory) && !string.IsNullOrWhiteSpace(container.Memory))
+                    DetectFleetThreshold(prior.MemoryPercent, container.MemoryPercent, FleetMemoryThreshold, "container_memory", "memory", current, container);
+            }
+            if (FleetImages && container.IsLive && !container.ImagePinned && !prior.ImageUpdate && container.ImageUpdate) AddFleetEvent("image_update", "warning", current, container, $"Newer local image for {container.CleanName}", container.ImageReference);
+            else if (FleetImages && container.IsLive && !container.ImagePinned && prior.ImageUpdate && !container.ImageUpdate) AddFleetEvent("image_updated", "ok", current, container, $"{container.CleanName} now uses the current image", container.ImageReference);
+        }
+        foreach (var removed in before.Where(pair => !now.ContainsKey(pair.Key)).Select(pair => pair.Value))
+            AddFleetEvent("container_removed", "info", current, removed, $"{removed.CleanName} was removed", removed.ImageReference);
+
+        if (FleetResources) DetectFleetThreshold(old.Resources.MemoryPercent, current.Resources.MemoryPercent, FleetMemoryThreshold, "host_memory", "Host memory", current, null);
+    }
+
+    private void DetectFleetThreshold(double before, double current, double limit, string kind, string label,
+        FleetHostSnapshot host, FleetContainerSnapshot? container)
+    {
+        if (before < limit && current >= limit) AddFleetEvent(kind + "_high", "warning", host, container, $"High {label}{(container is null ? "" : ": " + container.CleanName)}", $"{current:0.0}%");
+        else if (before >= limit && current < limit) AddFleetEvent(kind + "_recovered", "ok", host, container, $"{label} recovered{(container is null ? "" : ": " + container.CleanName)}", $"{current:0.0}%");
+    }
+
+    private void AddFleetEvent(string kind, string severity, FleetHostSnapshot host, FleetContainerSnapshot? container,
+        string title, string detail, int count = 1)
+    {
+        _fleetEvents.Insert(0, new FleetEvent
+        {
+            Kind = kind, Severity = severity, ServerId = host.ServerId, ServerLabel = host.ServerLabel,
+            ContainerId = container?.ShortId ?? "", ContainerName = container?.CleanName ?? "",
+            Title = title, Detail = detail, Count = count
+        });
+        if (_fleetEvents.Count > 250) _fleetEvents.RemoveRange(250, _fleetEvents.Count - 250);
+        _ = _settings.SaveFleetEventsAsync(_fleetEvents);
+    }
+
     private async Task RefreshContainersAsync()
     {
         if (_server is null)
@@ -283,6 +447,256 @@ public partial class MainPage : ContentPage
         var version = string.IsNullOrWhiteSpace(_runtime.DockerVersion) ? "" : $" Docker {_runtime.DockerVersion}.";
         SetStatus($"{_server.DisplayName}: {running}/{_runtime.Containers.Count} containers running.{version}");
     }
+
+    private void RenderFleet()
+    {
+        var stack = PageStack();
+        stack.Add(TitleRow("Fleet Health", ActionButton("Refresh all", RefreshFleetAsync)));
+        var issues = FleetIssues();
+        var online = _fleetSnapshots.Values.Count(s => s.Reachable);
+        var healthy = _fleetSnapshots.Values.SelectMany(s => s.Containers)
+            .Count(c => c.IsRunning && c.HealthValue != "unhealthy");
+        var warnings = issues.Count(i => i.Severity == "warning");
+        var critical = issues.Count(i => i.Severity == "critical");
+        stack.Add(new Grid
+        {
+            ColumnDefinitions =
+            {
+                new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Star),
+                new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Star)
+            },
+            ColumnSpacing = 6,
+            Children =
+            {
+                FleetMetric("Hosts", $"{online}/{_servers.Count}", Theme.Accent).AtColumn(0),
+                FleetMetric("Healthy", healthy.ToString(), Theme.Positive).AtColumn(1),
+                FleetMetric("Warnings", warnings.ToString(), Theme.Warning).AtColumn(2),
+                FleetMetric("Critical", critical.ToString(), Theme.Negative).AtColumn(3)
+            }
+        });
+
+        stack.Add(SectionLabel($"Problems ({issues.Count})"));
+        if (issues.Count == 0) stack.Add(EmptyCard(_servers.Count == 0 ? "Add a server in Settings." : "Fleet looks healthy."));
+        foreach (var issue in issues)
+        {
+            var actions = new FlexLayout { Wrap = FlexWrap.Wrap };
+            if (!string.IsNullOrWhiteSpace(issue.ContainerId))
+            {
+                actions.Add(ActionButton("Restart", async () =>
+                {
+                    var server = _servers.First(s => s.Id == issue.ServerId);
+                    await _backend.ContainerActionAsync(server, "restart", issue.ContainerId);
+                    await RefreshFleetAsync();
+                }));
+            }
+            actions.Add(ActionButton(issue.Feature == "disk" ? "Cleanup" : issue.Feature == "nginx" ? "Certificates" : "Open",
+                async () => { await OpenFleetTargetAsync(issue.ServerId, issue.Feature); }));
+            stack.Add(PanelCard(issue.Title, new VerticalStackLayout
+            {
+                Spacing = 4,
+                Children =
+                {
+                    new Label { Text = issue.ServerLabel + (string.IsNullOrWhiteSpace(issue.ContainerName) ? "" : " / " + issue.ContainerName), FontSize = 12, TextColor = Theme.TextMuted },
+                    new Label { Text = issue.Detail, FontSize = 12, TextColor = issue.Severity == "critical" ? Theme.Negative : Theme.Warning, IsVisible = !string.IsNullOrWhiteSpace(issue.Detail) },
+                    actions
+                }
+            }));
+        }
+
+        stack.Add(SectionLabel("Hosts"));
+        foreach (var server in _servers)
+        {
+            _fleetSnapshots.TryGetValue(server.Id, out var host);
+            var detail = host is null ? "waiting for first sample"
+                : !host.Reachable ? $"offline · {host.Reason}"
+                : !host.DockerOk ? $"SSH online · Docker unavailable ({host.Reason})"
+                : $"{host.Containers.Count(c => c.IsRunning)}/{host.Containers.Count} running · memory {host.Resources.MemoryPercent:0}%"
+                  + (host.Disk is null ? "" : $" · disk {host.Disk.Disk.UsePercent}");
+            stack.Add(PanelCard(server.DisplayName, new VerticalStackLayout
+            {
+                Spacing = 4,
+                Children =
+                {
+                    new Label { Text = detail, FontSize = 12, TextColor = host?.Reachable == true && host.DockerOk ? Theme.Positive : Theme.Negative },
+                    ActionButton("Open", async () => await OpenFleetTargetAsync(server.Id, "containers"))
+                }
+            }));
+        }
+
+        var certs = _fleetSnapshots.Values.SelectMany(host => host.Certificates.Select(cert => (host, cert, days: CertificateDays(cert.Expiry))))
+            .OrderBy(row => row.days).ToList();
+        stack.Add(SectionLabel($"SSL certificates ({certs.Count(c => c.days <= FleetSslDays)} expiring)"));
+        foreach (var row in certs)
+        {
+            stack.Add(PanelCard(string.IsNullOrWhiteSpace(row.cert.Domains) ? row.cert.Name : row.cert.Domains,
+                new VerticalStackLayout
+                {
+                    Spacing = 4,
+                    Children =
+                    {
+                        DataRow("host", row.host.ServerLabel), DataRow("expires", row.cert.Expiry),
+                        new Label { Text = row.days < 0 ? $"expired {-row.days}d" : $"{row.days} days remaining", FontSize = 12,
+                            TextColor = row.days < 0 ? Theme.Negative : row.days <= FleetSslDays ? Theme.Warning : Theme.Positive },
+                        ActionButton("Manage", async () => await OpenFleetTargetAsync(row.host.ServerId, "nginx"))
+                    }
+                }));
+        }
+
+        var imageRows = _fleetSnapshots.Values.SelectMany(host => host.Containers.Where(c => c.IsLive)
+            .GroupBy(c => c.ImageReference).Select(g => (host, container: g.First())))
+            .OrderBy(row => row.container.ImageUpdate ? 0 : 1).ThenBy(row => row.container.ImageReference).ToList();
+        stack.Add(SectionLabel($"Images ({imageRows.Count(r => r.container.ImageUpdate)} locally updated)"));
+        stack.Add(new Label { Text = "Read-only local tag comparison; Dockswain never pulls images in the background.", FontSize = 12, TextColor = Theme.TextMuted });
+        foreach (var row in imageRows)
+        {
+            stack.Add(PanelCard(row.container.ImageReference, new VerticalStackLayout
+            {
+                Spacing = 4,
+                Children =
+                {
+                    DataRow("host", row.host.ServerLabel),
+                    new Label { Text = row.container.ImageUpdate ? "newer local image available" : row.container.ImagePinned ? "digest pinned" : "tag reference",
+                        FontSize = 12, TextColor = row.container.ImageUpdate ? Theme.Warning : Theme.TextMuted }
+                }
+            }));
+        }
+
+        stack.Add(SectionLabel("Event history"));
+        var clear = ActionButton("Clear history", async () =>
+        {
+            _fleetEvents = [];
+            await _settings.SaveFleetEventsAsync(_fleetEvents);
+            RenderFleet();
+        });
+        stack.Add(clear);
+        if (_fleetEvents.Count == 0) stack.Add(EmptyCard("No changes recorded yet. The first poll establishes a silent baseline."));
+        foreach (var item in _fleetEvents.Take(100))
+        {
+            stack.Add(PanelCard(item.Title, new VerticalStackLayout
+            {
+                Spacing = 3,
+                Children =
+                {
+                    new Label { Text = $"{item.Timestamp:g} · {item.ServerLabel}" + (string.IsNullOrWhiteSpace(item.ContainerName) ? "" : " / " + item.ContainerName), FontSize = 11, TextColor = Theme.TextMuted },
+                    new Label { Text = item.Detail, FontSize = 12, TextColor = item.Severity == "critical" ? Theme.Negative : item.Severity == "warning" ? Theme.Warning : Theme.TextMuted }
+                }
+            }));
+        }
+        _content.Content = Scroll(stack);
+    }
+
+    private async Task OpenFleetTargetAsync(string serverId, string feature)
+    {
+        var server = _servers.FirstOrDefault(s => s.Id == serverId);
+        if (server is null) return;
+        _feature = feature switch { "disk" => Feature.Disk, "nginx" => Feature.Nginx, _ => Feature.Containers };
+        _server = server;
+        _loadingServers = true;
+        _serverPicker.SelectedItem = server;
+        _loadingServers = false;
+        SyncTabs();
+        await RefreshCurrentFeatureAsync();
+    }
+
+    private List<FleetIssue> FleetIssues()
+    {
+        var issues = new List<FleetIssue>();
+        foreach (var server in _servers)
+        {
+            if (!_fleetSnapshots.TryGetValue(server.Id, out var host))
+            {
+                issues.Add(FleetIssue("warning", "checking", server, null, $"Checking {server.DisplayName}", "Waiting for the first fleet sample"));
+                continue;
+            }
+            if (!host.Reachable) { issues.Add(FleetIssue("critical", "host_offline", server, null, "Host offline", host.Reason)); continue; }
+            if (!host.DockerOk) { issues.Add(FleetIssue("critical", "docker_unavailable", server, null, "Docker unavailable", host.Reason)); continue; }
+            if (FleetResources && host.Resources.MemoryPercent >= FleetMemoryThreshold)
+                issues.Add(FleetIssue("warning", "host_memory", server, null, $"Host memory {host.Resources.MemoryPercent:0}%", "Memory threshold exceeded"));
+            foreach (var c in host.Containers)
+            {
+                if ((c.IsLive && c.HealthValue == "unhealthy") || c.StateValue == "dead") issues.Add(FleetIssue("critical", "unhealthy", server, c, $"{c.CleanName} is unhealthy", c.Status, "containers"));
+                var recent = RecentRestarts(server.Id, c.ShortId);
+                if (recent >= FleetRestartThreshold) issues.Add(FleetIssue("warning", "restart_burst", server, c, $"{c.CleanName} restarted {recent} times", $"within {FleetRestartWindow} minutes", "containers"));
+                if (c.StateValue == "restarting") issues.Add(FleetIssue("warning", "restarting", server, c, $"{c.CleanName} is restarting", c.Status, "containers"));
+                if (FleetResources && c.IsLive && c.CpuPercent >= FleetCpuThreshold) issues.Add(FleetIssue("warning", "cpu", server, c, $"{c.CleanName} CPU {c.Cpu}", "100% equals one fully used CPU core", "containers"));
+                if (FleetResources && c.IsLive && c.MemoryPercent >= FleetMemoryThreshold) issues.Add(FleetIssue("warning", "memory", server, c, $"{c.CleanName} memory {c.Memory}", c.MemoryUsage, "containers"));
+                if (FleetImages && c.IsLive && !c.ImagePinned && c.ImageUpdate) issues.Add(FleetIssue("warning", "image", server, c, $"{c.CleanName} uses an older image", c.ImageReference, "containers"));
+                if (RecentCrash(c)) issues.Add(FleetIssue("warning", "crashed", server, c, $"{c.CleanName} exited with code {c.ExitCode}", c.Status, "containers"));
+            }
+            if (FleetDisk && host.Disk is not null && Percent(host.Disk.Disk.UsePercent) >= FleetDiskThreshold)
+                issues.Add(FleetIssue(Percent(host.Disk.Disk.UsePercent) >= 95 ? "critical" : "warning", "disk", server, null,
+                    $"Disk {host.Disk.Disk.UsePercent}", $"{ByteFormatter.Human(ReclaimableBytes(host.Disk.Df))} reclaimable", "disk"));
+            if (FleetSsl)
+            {
+                foreach (var cert in host.Certificates.Where(c => CertificateDays(c.Expiry) <= FleetSslDays))
+                {
+                    var days = CertificateDays(cert.Expiry);
+                    issues.Add(FleetIssue(days < 0 ? "critical" : "warning", "ssl", server, null,
+                        days < 0 ? $"SSL expired: {cert.Domains}" : $"SSL expires in {days}d: {cert.Domains}", cert.Expiry, "nginx"));
+                }
+            }
+        }
+        return issues.OrderByDescending(i => i.Severity == "critical" ? 2 : 1).ThenBy(i => i.ServerLabel).ToList();
+    }
+
+    private bool RecentCrash(FleetContainerSnapshot container)
+    {
+        if (container.StateValue != "exited" || container.ExitCode == 0
+            || !DateTimeOffset.TryParse(container.FinishedAt, out var finished)) return false;
+        var age = DateTimeOffset.Now - finished;
+        return age >= TimeSpan.Zero && age <= TimeSpan.FromMinutes(Math.Max(5, FleetRestartWindow));
+    }
+
+    private static FleetIssue FleetIssue(string severity, string kind, ServerProfile server, FleetContainerSnapshot? container,
+        string title, string detail, string feature = "") => new()
+    {
+        Severity = severity, Kind = kind, ServerId = server.Id, ServerLabel = server.DisplayName,
+        ContainerId = container?.ShortId ?? "", ContainerName = container?.CleanName ?? "",
+        Title = title, Detail = detail, Feature = feature
+    };
+
+    private int RecentRestarts(string serverId, string containerId)
+    {
+        var cutoff = DateTimeOffset.Now.AddMinutes(-FleetRestartWindow);
+        return _fleetEvents.Where(e => e.ServerId == serverId && e.ContainerId == containerId
+            && e.Kind == "container_restart" && e.Timestamp >= cutoff).Sum(e => e.Count);
+    }
+
+    private static double Percent(string value) => double.TryParse(value.Trim().TrimEnd('%'),
+        System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
+    private static long ReclaimableBytes(IEnumerable<DockerDfEntry> rows) => rows.Sum(row => DockerBytes(row.Reclaimable));
+    private static long DockerBytes(string value)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(value,
+            @"([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?i?B)?", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!match.Success || !double.TryParse(match.Groups[1].Value,
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number)) return 0;
+        var unit = match.Groups[2].Value.ToUpperInvariant();
+        var power = unit.Length == 0 ? 0 : "KMGTPE".IndexOf(unit[0]) + 1;
+        var radix = unit.Contains('I') ? 1024d : 1000d;
+        return (long)(number * Math.Pow(radix, Math.Max(0, power)));
+    }
+    private static int CertificateDays(string expiry, DateTimeOffset? relativeTo = null)
+    {
+        var raw = expiry.Split('(', 2)[0].Trim();
+        return DateTimeOffset.TryParse(raw, out var date)
+            ? (int)Math.Floor((date - (relativeTo ?? DateTimeOffset.Now)).TotalDays) : int.MaxValue;
+    }
+
+    private static View FleetMetric(string title, string value, Color color) => new Border
+    {
+        Padding = new Thickness(5, 8), Stroke = color, StrokeThickness = 1,
+        BackgroundColor = color.WithAlpha(0.12f),
+        Content = new VerticalStackLayout
+        {
+            Spacing = 1, HorizontalOptions = LayoutOptions.Center,
+            Children =
+            {
+                new Label { Text = value, FontSize = 18, FontAttributes = FontAttributes.Bold, TextColor = color, HorizontalTextAlignment = TextAlignment.Center },
+                new Label { Text = title, FontSize = 10, TextColor = Theme.TextMuted, HorizontalTextAlignment = TextAlignment.Center }
+            }
+        }
+    };
 
     private async Task RefreshFilesAsync()
     {
@@ -927,6 +1341,26 @@ public partial class MainPage : ContentPage
         stack.Add(new Label { Text = "Settings", FontSize = 22, FontAttributes = FontAttributes.Bold });
         stack.Add(tools);
 
+        stack.Add(SectionLabel("Fleet Health"));
+        stack.Add(PreferenceToggle("Monitor CPU and memory thresholds", "dockswain.fleet.resources", true));
+        stack.Add(PreferenceNumber("Health refresh (seconds)", "dockswain.fleet.refresh", 30, 10, 600,
+            value => { if (_fleetTimer is not null) _fleetTimer.Interval = TimeSpan.FromSeconds(value); }));
+        stack.Add(PreferenceNumber("Disk / SSL refresh (seconds)", "dockswain.fleet.deep", 900, 300, 21600));
+        stack.Add(PreferenceNumber("Container CPU warning (100% = one core)", "dockswain.fleet.cpu", 85, 1, 1000));
+        stack.Add(PreferenceNumber("Memory warning (%)", "dockswain.fleet.memory", 85, 1, 100));
+        stack.Add(PreferenceToggle("Monitor disk pressure", "dockswain.fleet.diskEnabled", true));
+        stack.Add(PreferenceNumber("Disk warning (%)", "dockswain.fleet.disk", 85, 1, 100));
+        stack.Add(PreferenceToggle("Monitor certificate expiry", "dockswain.fleet.sslEnabled", true));
+        stack.Add(PreferenceNumber("SSL warning window (days)", "dockswain.fleet.sslDays", 14, 1, 180));
+        stack.Add(PreferenceToggle("Detect locally updated images", "dockswain.fleet.images", true));
+        stack.Add(PreferenceNumber("Restart warning count", "dockswain.fleet.restartCount", 3, 1, 100));
+        stack.Add(PreferenceNumber("Restart window (minutes)", "dockswain.fleet.restartWindow", 60, 5, 1440));
+        stack.Add(new Label
+        {
+            Text = "Fleet monitoring covers every configured profile while Dockswain Mobile is active. Mobile operating systems may suspend polling in the background.",
+            FontSize = 12, TextColor = Theme.TextMuted
+        });
+
         if (_servers.Count == 0)
         {
             stack.Add(EmptyCard("No servers configured. Add an SSH target with Docker access."));
@@ -1092,6 +1526,45 @@ public partial class MainPage : ContentPage
         };
     }
 
+    private static View PreferenceToggle(string text, string key, bool defaultValue)
+    {
+        var toggle = new Switch { IsToggled = Preferences.Default.Get(key, defaultValue), VerticalOptions = LayoutOptions.Center };
+        toggle.Toggled += (_, e) => Preferences.Default.Set(key, e.Value);
+        return new Grid
+        {
+            ColumnDefinitions = { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) },
+            Children =
+            {
+                new Label { Text = text, FontSize = 12, VerticalTextAlignment = TextAlignment.Center },
+                toggle.AtColumn(1)
+            }
+        };
+    }
+
+    private static View PreferenceNumber(string text, string key, int defaultValue, int minimum, int maximum,
+        Action<int>? changed = null)
+    {
+        var entry = new Entry
+        {
+            Text = Preferences.Default.Get(key, defaultValue).ToString(), Keyboard = Keyboard.Numeric,
+            WidthRequest = 90, HorizontalTextAlignment = TextAlignment.End
+        };
+        entry.Unfocused += (_, _) =>
+        {
+            var value = int.TryParse(entry.Text, out var parsed) ? Math.Clamp(parsed, minimum, maximum) : defaultValue;
+            entry.Text = value.ToString(); Preferences.Default.Set(key, value); changed?.Invoke(value);
+        };
+        return new Grid
+        {
+            ColumnDefinitions = { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) },
+            Children =
+            {
+                new Label { Text = text, FontSize = 12, VerticalTextAlignment = TextAlignment.Center },
+                entry.AtColumn(1)
+            }
+        };
+    }
+
     private static VerticalStackLayout PageStack()
     {
         return new VerticalStackLayout
@@ -1181,6 +1654,7 @@ public partial class MainPage : ContentPage
     {
         return feature switch
         {
+            Feature.Fleet => "Fleet",
             Feature.Containers => "Containers",
             Feature.Compose => "Compose",
             Feature.Disk => "Disk",

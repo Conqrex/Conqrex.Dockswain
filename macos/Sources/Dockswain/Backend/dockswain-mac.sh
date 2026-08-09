@@ -20,7 +20,7 @@
 #
 # Usage:
 #   dockswain-mac.sh <sub> <user@host> <port> <keyOrEmpty> [args...]
-#       sub = probe | list | stats | compose | action | compose-action | logs
+#       sub = probe | list | stats | fleet-health | compose | action | compose-action | logs
 #           | exec-cmd | ssh-cmd | disk | prune | container-logs | truncate-log
 #           | stack-action | readfile | writefile | sftp-home | sftp-list
 #           | sftp-mkdir | sftp-rename | sftp-delete | scp-up | scp-down
@@ -137,15 +137,21 @@ SSH+=("$TARGET")
 
 SSH_OUT=""; SSH_ERR=""; SSH_RC=0
 ssh_exec() {
-    local errf; errf=$(mktemp 2>/dev/null) || { SSH_RC=99; return; }
-    SSH_OUT=$("${SSH[@]}" "$1" 2>"$errf"); SSH_RC=$?
+    local errf remote_cmd
+    errf=$(mktemp 2>/dev/null) || { SSH_RC=99; return; }
+    # Do not assume the configured account uses a POSIX login shell. This keeps
+    # multiline Docker probes working for Fish/Zsh users as well as Bash users.
+    remote_cmd="sh -c '$(rsq "$1")'"
+    SSH_OUT=$("${SSH[@]}" "$remote_cmd" 2>"$errf"); SSH_RC=$?
     SSH_ERR=$(cat "$errf" 2>/dev/null); rm -f "$errf"
 }
 
 # classify a non-zero ssh/docker result into a stable reason code
 classify() {
     local e="$SSH_ERR"
-    if echo "$e" | grep -qiE 'docker daemon socket|cannot connect to the docker daemon'; then
+    if echo "$e" | grep -qiE 'sudo:.*(password is required|terminal is required|no tty|askpass)|must have a tty to run sudo'; then
+        echo "sudo_password"
+    elif echo "$e" | grep -qiE 'docker daemon socket|cannot connect to the docker daemon'; then
         if echo "$e" | grep -qiE 'permission denied'; then echo "docker_permission"; else echo "docker_down"; fi
     elif echo "$e" | grep -qiE 'docker: command not found|not found'; then echo "docker_missing"
     elif echo "$e" | grep -qiE 'permission denied \(|publickey|password|authenticat'; then echo "ssh_auth"
@@ -202,6 +208,86 @@ list)
     ssh_exec "$DOCKER ps -a --no-trunc --format '{{json .}}'"
     if [ "$SSH_RC" -ne 0 ]; then printf '@@ERR@@ %s\n' "$(classify)"; exit 0; fi
     printf '%s\n' "$SSH_OUT"
+    ;;
+
+# One normalized, read-only sample for the all-server Fleet Health monitor. The
+# interactive list/stats output remains unchanged for compatibility.
+fleet-health)
+    WANT_STATS="${1:-1}"; case "$WANT_STATS" in 0|1) ;; *) WANT_STATS=1 ;; esac
+    IFS= read -r -d '' remote <<REMOTE || true
+printf '%s\n' '@@VERSION@@'
+$DOCKER version --format '{{.Server.Version}}' || exit \$?
+printf '%s\n' '@@PS@@'
+$DOCKER ps -a --no-trunc --format '{{json .}}' || exit \$?
+ids=\$($DOCKER ps -aq --no-trunc 2>/dev/null)
+printf '%s\n' '@@INSPECT@@'
+[ -z "\$ids" ] || $DOCKER inspect --format '{{json .}}' \$ids
+printf '%s\n' '@@STATS@@'
+if [ '$WANT_STATS' = 1 ]; then $DOCKER stats --no-stream --format '{{json .}}' 2>/dev/null || true; fi
+printf '%s\n' '@@IMAGES@@'
+if [ -n "\$ids" ]; then
+  $DOCKER inspect --format '{{.Config.Image}}' \$ids 2>/dev/null | sort -u | while IFS= read -r ref; do
+    [ -n "\$ref" ] || continue
+    printf '%s\t' "\$ref"
+    $DOCKER image inspect --format '{{.Id}}|{{.Created}}|{{json .RepoTags}}|{{json .RepoDigests}}' "\$ref" 2>/dev/null || printf '||[]|[]\n'
+  done
+fi
+printf '%s\n' '@@HOST@@'
+cpus=\$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
+load1=\$(awk '{print \$1}' /proc/loadavg 2>/dev/null || echo 0)
+awk -v cpus="\$cpus" -v load1="\$load1" '
+  /MemTotal:/ { total=\$2*1024 }
+  /MemAvailable:/ { avail=\$2*1024 }
+  END { used=total-avail; pct=(total>0 ? used*100/total : 0);
+        printf "{\"cpus\":%d,\"load1\":%.2f,\"memoryTotal\":%.0f,\"memoryUsed\":%.0f,\"memoryPct\":%.2f}\n", cpus, load1, total, used, pct }' /proc/meminfo
+REMOTE
+    ssh_exec "$remote"
+    if [ "$SSH_RC" -ne 0 ]; then
+        reason=$(classify); reachable=true
+        case "$reason" in ssh_auth|dns|refused|timeout|unreachable|ssh_error) reachable=false;; esac
+        printf '{"ok":false,"reachable":%s,"dockerOk":false,"reason":"%s"}\n' "$reachable" "$reason"
+        exit 0
+    fi
+    section() {
+        local from="$1" to="$2"
+        printf '%s\n' "$SSH_OUT" | awk -v a="@@${from}@@" -v b="@@${to}@@" '
+            $0==a { on=1; next } $0==b { exit } on { print }'
+    }
+    version=$(section VERSION PS | head -1 | tr -d '\r')
+    psjson=$(section PS INSPECT | jq -sc '
+      [ .[] | {id:(.ID//""|.[0:12]),fullId:(.ID//""),name:(.Names//""),image:(.Image//""),
+        state:(.State//""|ascii_downcase),status:(.Status//""),ports:(.Ports//""),
+        networks:(.Networks//""),created:(.CreatedAt//"")} ]' 2>/dev/null)
+    [ -n "$psjson" ] || psjson='[]'
+    inspect=$(section INSPECT STATS | jq -sc '
+      reduce .[] as $c ({}; .[$c.Id]={restartCount:($c.RestartCount//0),exitCode:($c.State.ExitCode//0),
+        health:($c.State.Health.Status//""),startedAt:($c.State.StartedAt//""),finishedAt:($c.State.FinishedAt//""),
+        imageRef:($c.Config.Image//""),imageId:($c.Image//"")})' 2>/dev/null)
+    [ -n "$inspect" ] || inspect='{}'
+    stats=$(section STATS IMAGES | jq -sc '
+      reduce .[] as $s ({}; .[($s.ID//""|.[0:12])]={cpu:($s.CPUPerc//""),mem:($s.MemPerc//""),
+        memUsage:($s.MemUsage//""),net:($s.NetIO//""),block:($s.BlockIO//""),pids:($s.PIDs//"")})' 2>/dev/null)
+    [ -n "$stats" ] || stats='{}'
+    images=$(section IMAGES HOST | jq -Rsc '
+      split("\n")|map(select(length>0))|map(split("\t"))|reduce .[] as $row ({};
+        (($row[1]//"")|split("|")) as $i|.[$row[0]]={
+        ref:($row[0]//""),id:($i[0]//""),created:($i[1]//""),tags:(try($i[2]|fromjson)catch[]),
+        digests:(try($i[3]|fromjson)catch[])})' 2>/dev/null)
+    [ -n "$images" ] || images='{}'
+    host=$(printf '%s\n' "$SSH_OUT" | awk 'f{print;exit} /^@@HOST@@$/{f=1}' | jq -c '.' 2>/dev/null)
+    [ -n "$host" ] || host='{"cpus":0,"load1":0,"memoryTotal":0,"memoryUsed":0,"memoryPct":0}'
+    containers=$(printf '%s\n%s\n%s\n%s\n' "$psjson" "$inspect" "$stats" "$images" | jq -sc '
+      .[0] as $ps|.[1] as $ins|.[2] as $stats|.[3] as $images|
+      [$ps[]|. as $p|($ins[$p.fullId]//{}) as $i|($stats[$p.id]//{}) as $s|
+       (($i.imageRef//"")|if .=="" then $p.image else . end) as $ref|($images[$ref]//{}) as $img|
+       $p+$i+$s+{imageRef:$ref,currentImageId:($img.id//""),imageCreated:($img.created//""),
+       imageDigests:($img.digests//[]),imageUpdate:(($ref|contains("@sha256:")|not) and
+       ($img.id//"")!="" and ($i.imageId//"")!="" and $img.id!=$i.imageId),
+       imagePinned:($ref|contains("@sha256:"))}]')
+    image_list=$(printf '%s' "$images" | jq -c '[to_entries[].value]' 2>/dev/null); [ -n "$image_list" ] || image_list='[]'
+    printf '%s\n%s\n%s\n' "$containers" "$host" "$image_list" | jq -sc --arg v "$version" '
+      .[0] as $c|.[1] as $h|.[2] as $i|
+      {ok:true,reachable:true,dockerOk:true,version:$v,imageAwarenessVersion:2,containers:$c,host:$h,images:$i}'
     ;;
 
 stats)

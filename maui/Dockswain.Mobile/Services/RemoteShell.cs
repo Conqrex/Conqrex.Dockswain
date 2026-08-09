@@ -267,6 +267,11 @@ public sealed class RemoteShell(SettingsStore settings)
     private static RemoteCommandException MapCommandFailure(RemoteCommandResult result)
     {
         var combined = result.Combined;
+        if (combined.Contains("permission denied while trying to connect", StringComparison.OrdinalIgnoreCase))
+        {
+            return new RemoteCommandException("docker_permission", combined);
+        }
+
         if (combined.Contains("permission denied", StringComparison.OrdinalIgnoreCase))
         {
             return new RemoteCommandException("permission", combined);
@@ -283,11 +288,6 @@ public sealed class RemoteShell(SettingsStore settings)
         if (combined.Contains("Cannot connect to the Docker daemon", StringComparison.OrdinalIgnoreCase))
         {
             return new RemoteCommandException("docker_down", combined);
-        }
-
-        if (combined.Contains("permission denied while trying to connect", StringComparison.OrdinalIgnoreCase))
-        {
-            return new RemoteCommandException("docker_permission", combined);
         }
 
         if (combined.Contains("docker: command not found", StringComparison.OrdinalIgnoreCase))

@@ -20,6 +20,7 @@ internal static class Theme
     public static readonly Color Accent = Color.FromArgb("#1F6F8B");
     public static readonly Color AccentText = Color.FromArgb("#FFFFFF");
     public static readonly Color Positive = Color.FromArgb("#3FB950");
+    public static readonly Color Warning = Color.FromArgb("#D29922");
     public static readonly Color Negative = Color.FromArgb("#E05561");
 
     // Flat panel geometry.

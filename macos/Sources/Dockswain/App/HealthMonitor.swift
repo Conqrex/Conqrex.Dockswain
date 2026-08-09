@@ -9,11 +9,9 @@ struct HealthEvent {
     let detail: String      // the docker status line, for context
 }
 
-/// Turns container state-transitions into macOS notifications. A single shared
-/// instance is fed events by every open ServerSession; it decides whether to post
-/// based on the user's per-event toggles (read live from UserDefaults, written by
-/// AppState). It holds no per-container memory of its own — sessions only hand it
-/// genuine transitions, so there's nothing to de-duplicate here.
+/// Native macOS notification channel. FleetMonitor feeds all-host events into this
+/// shared instance; the original pure container-transition detector remains for
+/// compatibility and focused unit testing.
 @MainActor
 final class HealthMonitor {
     static let shared = HealthMonitor()
@@ -29,6 +27,19 @@ final class HealthMonitor {
     /// Ask for permission. Called when the user flips the master toggle on.
     func requestAuthorization() {
         center?.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    /// Fleet-wide alerts (host, disk, resource, image and certificate events) use
+    /// the same native notification channel as container lifecycle transitions.
+    func postFleet(title: String, detail: String, critical _: Bool) {
+        guard UDefault.bool("notificationsEnabled", false), let center else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = detail
+        // Keep fleet notifications compatible with ordinary notification
+        // authorization; critical-alert sounds require a separate entitlement.
+        content.sound = .default
+        center.add(UNNotificationRequest(identifier: "fleet:\(title):\(detail)", content: content, trigger: nil))
     }
 
     /// Diff two snapshots (keyed by full container id) and post for each real change.

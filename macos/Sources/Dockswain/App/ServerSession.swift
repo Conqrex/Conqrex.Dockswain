@@ -113,10 +113,10 @@ final class ServerSession: ObservableObject, Identifiable {
         do {
             let list = try await backend.list(server)
             if Task.isCancelled { return }
-            // Health monitoring: diff this poll against the last and notify on changes.
-            // The baseline (nil on a fresh/reconnected tab) is recorded silently.
+            // FleetMonitor owns transition alerts for every configured host. Keep a
+            // local baseline only for compatibility with the session lifecycle; do
+            // not notify here or an open tab would duplicate the fleet event.
             let snapshot = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-            HealthMonitor.shared.process(previous: lastSnapshot, current: snapshot, server: server)
             lastSnapshot = snapshot
             containers = list.sorted { a, b in
                 if a.isRunning != b.isRunning { return a.isRunning }

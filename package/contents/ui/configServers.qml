@@ -9,6 +9,11 @@ import org.kde.prison as Prison
 KCM.SimpleKCM {
     id: page
 
+    // The server list lives in a ListModel rather than a control property alias.
+    // Emit the explicit configuration signal so Plasma's KCM reliably enables
+    // Apply/OK after structural changes such as removing a row.
+    signal configurationChanged()
+
     property string cfg_serversJson: "[]"
     property string cfg_dockerCmd: "docker"
     property string cfg_nginxDir: "/etc/nginx"
@@ -22,6 +27,7 @@ KCM.SimpleKCM {
     function secretKey(user, host, port) {
         return (user ? user + "@" : "") + host + ":" + port;
     }
+    function enabledOrDefault(value) { return value === undefined || value === null ? true : !!value; }
 
     property string importNote: ""
     function scriptPath() { return Qt.resolvedUrl("../code/dockswain.sh").toString().replace(/^file:\/\//, ""); }
@@ -36,7 +42,17 @@ KCM.SimpleKCM {
                     label: s.label || "", user: s.user || "", host: s.host || "",
                     port: (s.port || 22), key: s.key || "", auth: s.auth || "key",
                     remmina: s.remmina || "", hasSecret: s.hasSecret || false,
-                    useSudo: s.useSudo || false
+                    useSudo: s.useSudo || false,
+                    notifyEnabled: page.enabledOrDefault(s.notifyEnabled),
+                    notifyAvailability: page.enabledOrDefault(s.notifyAvailability),
+                    notifyHealth: page.enabledOrDefault(s.notifyHealth),
+                    notifyCpu: page.enabledOrDefault(s.notifyCpu),
+                    notifyMemory: page.enabledOrDefault(s.notifyMemory),
+                    notifyRestarts: page.enabledOrDefault(s.notifyRestarts),
+                    notifyImages: page.enabledOrDefault(s.notifyImages),
+                    notifyDisk: page.enabledOrDefault(s.notifyDisk),
+                    notifySsl: page.enabledOrDefault(s.notifySsl),
+                    notifyOnly: s.notifyOnly || "", notifyMute: s.notifyMute || ""
                 });
             });
         } catch (e) {}
@@ -46,10 +62,26 @@ KCM.SimpleKCM {
         for (var i = 0; i < serversModel.count; i++) {
             var r = serversModel.get(i);
             arr.push({ label: r.label, user: r.user, host: r.host, port: r.port, key: r.key, auth: r.auth,
-                       remmina: r.remmina || "", hasSecret: r.hasSecret || false, useSudo: r.useSudo || false });
+                       remmina: r.remmina || "", hasSecret: r.hasSecret || false, useSudo: r.useSudo || false,
+                       notifyEnabled: page.enabledOrDefault(r.notifyEnabled),
+                       notifyAvailability: page.enabledOrDefault(r.notifyAvailability),
+                       notifyHealth: page.enabledOrDefault(r.notifyHealth),
+                       notifyCpu: page.enabledOrDefault(r.notifyCpu),
+                       notifyMemory: page.enabledOrDefault(r.notifyMemory),
+                       notifyRestarts: page.enabledOrDefault(r.notifyRestarts),
+                       notifyImages: page.enabledOrDefault(r.notifyImages),
+                       notifyDisk: page.enabledOrDefault(r.notifyDisk),
+                       notifySsl: page.enabledOrDefault(r.notifySsl),
+                       notifyOnly: r.notifyOnly || "", notifyMute: r.notifyMute || "" });
         }
-        page.cfg_serversJson = JSON.stringify(arr);
+        var next = JSON.stringify(arr);
+        if (page.cfg_serversJson === next) return;
+        page.cfg_serversJson = next;
+        page.configurationChanged();
     }
+    // Plasma calls this immediately before copying cfg_* properties. Keeping it
+    // as a final synchronization point also captures an editor that still has focus.
+    function saveConfig() { page.save(); }
     Component.onCompleted: load()
 
     Plasma5Support.DataSource {
@@ -76,7 +108,11 @@ KCM.SimpleKCM {
                                 label: h.label || "", user: h.user || "", host: h.host || "",
                                 port: (h.port || 22), key: h.key || "", auth: h.auth || "key",
                                 remmina: h.remmina || "", hasSecret: h.hasSecret || false,
-                                useSudo: false
+                                useSudo: false, notifyEnabled: true,
+                                notifyAvailability: true, notifyHealth: true,
+                                notifyCpu: true, notifyMemory: true, notifyRestarts: true,
+                                notifyImages: true, notifyDisk: true, notifySsl: true,
+                                notifyOnly: "", notifyMute: ""
                             });
                         }
                         if (h.filezilla) page.storeFzPass(h);    // copy FileZilla pass into the keyring
@@ -165,7 +201,11 @@ KCM.SimpleKCM {
             if (e.host === "localhost" && e.port === 22) { localUser.detect(i); return; }
         }
         serversModel.append({ label: i18n("Local Docker"), user: "", host: "localhost",
-            port: 22, key: "", auth: "key", remmina: "", hasSecret: false, useSudo: false });
+                              port: 22, key: "", auth: "key", remmina: "", hasSecret: false, useSudo: false,
+                              notifyEnabled: true, notifyAvailability: true, notifyHealth: true,
+                              notifyCpu: true, notifyMemory: true, notifyRestarts: true,
+                              notifyImages: true, notifyDisk: true, notifySsl: true,
+                              notifyOnly: "", notifyMute: "" });
         page.save();
         localUser.detect(serversModel.count - 1);
     }
@@ -206,7 +246,11 @@ KCM.SimpleKCM {
             QQC2.Button {
                 text: i18n("Add server")
                 icon.name: "list-add"
-                onClicked: { serversModel.append({ label: "", user: "root", host: "", port: 22, key: "", auth: "password", remmina: "", hasSecret: false, useSudo: false }); page.save(); }
+                onClicked: { serversModel.append({ label: "", user: "root", host: "", port: 22, key: "", auth: "password", remmina: "", hasSecret: false, useSudo: false,
+                                                     notifyEnabled: true, notifyAvailability: true, notifyHealth: true,
+                                                     notifyCpu: true, notifyMemory: true, notifyRestarts: true,
+                                                     notifyImages: true, notifyDisk: true, notifySsl: true,
+                                                     notifyOnly: "", notifyMute: "" }); page.save(); }
             }
             QQC2.Button {
                 text: i18n("Add local")
@@ -270,6 +314,7 @@ KCM.SimpleKCM {
                 Layout.fillWidth: true
                 property string rowAuth: model.auth
                 property bool rowHasSecret: model.hasSecret || false
+                property bool notificationsExpanded: false
 
                 GridLayout {
                     anchors.fill: parent
@@ -402,6 +447,109 @@ KCM.SimpleKCM {
                             Layout.fillWidth: true; wrapMode: Text.WordWrap
                             font: Kirigami.Theme.smallFont; opacity: 0.7
                             text: i18n("Runs privileged commands via sudo -n. Needs NOPASSWD sudo on the server. Leave off if the SSH user is root.")
+                        }
+                    }
+
+                    QQC2.Label {
+                        text: i18n("Notifications")
+                        Layout.alignment: Qt.AlignTop
+                        Layout.topMargin: Kirigami.Units.smallSpacing
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.topMargin: Kirigami.Units.smallSpacing
+                        spacing: Kirigami.Units.smallSpacing / 2
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            QQC2.CheckBox {
+                                text: i18n("Desktop alerts from this server")
+                                checked: model.notifyEnabled
+                                font.bold: true
+                                onToggled: { serversModel.setProperty(index, "notifyEnabled", checked); page.save(); }
+                            }
+                            Item { Layout.fillWidth: true }
+                            QQC2.ToolButton {
+                                text: rowFrame.notificationsExpanded ? i18n("Hide filters") : i18n("Customize")
+                                icon.name: rowFrame.notificationsExpanded ? "go-up" : "configure"
+                                display: QQC2.AbstractButton.TextBesideIcon
+                                onClicked: rowFrame.notificationsExpanded = !rowFrame.notificationsExpanded
+                            }
+                        }
+
+                        GridLayout {
+                            Layout.fillWidth: true
+                            visible: rowFrame.notificationsExpanded
+                            columns: 4
+                            columnSpacing: Kirigami.Units.gridUnit
+                            rowSpacing: 0
+                            enabled: model.notifyEnabled
+
+                            QQC2.CheckBox {
+                                text: i18n("Availability")
+                                checked: model.notifyAvailability
+                                onToggled: { serversModel.setProperty(index, "notifyAvailability", checked); page.save(); }
+                            }
+                            QQC2.CheckBox {
+                                text: i18n("Health & lifecycle")
+                                checked: model.notifyHealth
+                                onToggled: { serversModel.setProperty(index, "notifyHealth", checked); page.save(); }
+                            }
+                            QQC2.CheckBox {
+                                text: i18n("CPU")
+                                checked: model.notifyCpu
+                                onToggled: { serversModel.setProperty(index, "notifyCpu", checked); page.save(); }
+                            }
+                            QQC2.CheckBox {
+                                text: i18n("Memory")
+                                checked: model.notifyMemory
+                                onToggled: { serversModel.setProperty(index, "notifyMemory", checked); page.save(); }
+                            }
+                            QQC2.CheckBox {
+                                text: i18n("Restart bursts")
+                                checked: model.notifyRestarts
+                                onToggled: { serversModel.setProperty(index, "notifyRestarts", checked); page.save(); }
+                            }
+                            QQC2.CheckBox {
+                                text: i18n("Image updates")
+                                checked: model.notifyImages
+                                onToggled: { serversModel.setProperty(index, "notifyImages", checked); page.save(); }
+                            }
+                            QQC2.CheckBox {
+                                text: i18n("Disk pressure")
+                                checked: model.notifyDisk
+                                onToggled: { serversModel.setProperty(index, "notifyDisk", checked); page.save(); }
+                            }
+                            QQC2.CheckBox {
+                                text: i18n("SSL expiry")
+                                checked: model.notifySsl
+                                onToggled: { serversModel.setProperty(index, "notifySsl", checked); page.save(); }
+                            }
+                        }
+
+                        QQC2.Label {
+                            Layout.fillWidth: true
+                            visible: rowFrame.notificationsExpanded
+                            text: i18n("Project filters apply to container alerts only. Use exact Compose project, Swarm stack, service or container names; * and ? wildcards are supported.")
+                            wrapMode: Text.WordWrap
+                            opacity: model.notifyEnabled ? 0.7 : 0.4
+                            font: Kirigami.Theme.smallFont
+                        }
+                        QQC2.TextField {
+                            Layout.fillWidth: true
+                            visible: rowFrame.notificationsExpanded
+                            enabled: model.notifyEnabled
+                            text: model.notifyOnly
+                            placeholderText: i18n("Only notify for… (empty = all projects)")
+                            onEditingFinished: { serversModel.setProperty(index, "notifyOnly", text.trim()); page.save(); }
+                        }
+                        QQC2.TextField {
+                            Layout.fillWidth: true
+                            visible: rowFrame.notificationsExpanded
+                            enabled: model.notifyEnabled
+                            text: model.notifyMute
+                            placeholderText: i18n("Mute projects/containers… (comma-separated)")
+                            onEditingFinished: { serversModel.setProperty(index, "notifyMute", text.trim()); page.save(); }
                         }
                     }
                 }

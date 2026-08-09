@@ -204,6 +204,111 @@ public sealed class ServerRuntime
     public Dictionary<string, ContainerStat> StatsByContainerId { get; set; } = [];
 }
 
+public sealed class FleetContainerSnapshot
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Image { get; set; } = "";
+    public string ImageReference { get; set; } = "";
+    public string ImageId { get; set; } = "";
+    public string CurrentImageId { get; set; } = "";
+    public bool ImageUpdate { get; set; }
+    public bool ImagePinned { get; set; }
+    public string State { get; set; } = "";
+    public string Status { get; set; } = "";
+    public string Health { get; set; } = "";
+    public int RestartCount { get; set; }
+    public int ExitCode { get; set; }
+    public string FinishedAt { get; set; } = "";
+    public string Cpu { get; set; } = "";
+    public string Memory { get; set; } = "";
+    public string MemoryUsage { get; set; } = "";
+
+    [JsonIgnore]
+    public string ShortId => Id.Length <= 12 ? Id : Id[..12];
+    [JsonIgnore]
+    public string CleanName => Name.TrimStart('/');
+    [JsonIgnore]
+    public string StateValue => State.ToLowerInvariant();
+    [JsonIgnore]
+    public bool IsRunning => StateValue == "running";
+    [JsonIgnore]
+    public bool IsLive => StateValue is "running" or "restarting" or "paused";
+    [JsonIgnore]
+    public string HealthValue
+    {
+        get
+        {
+            if (!string.IsNullOrWhiteSpace(Health)) return Health.ToLowerInvariant();
+            if (Status.Contains("unhealthy", StringComparison.OrdinalIgnoreCase)) return "unhealthy";
+            if (Status.Contains("health: starting", StringComparison.OrdinalIgnoreCase)) return "starting";
+            if (Status.Contains("healthy", StringComparison.OrdinalIgnoreCase)) return "healthy";
+            return "";
+        }
+    }
+    [JsonIgnore]
+    public double CpuPercent => Percent(Cpu);
+    [JsonIgnore]
+    public double MemoryPercent => Percent(Memory);
+
+    private static double Percent(string value) => double.TryParse(
+        value.Trim().TrimEnd('%'), System.Globalization.NumberStyles.Float,
+        System.Globalization.CultureInfo.InvariantCulture, out var result) ? result : 0;
+}
+
+public sealed class FleetHostResources
+{
+    public int Cpus { get; set; }
+    public double Load1 { get; set; }
+    public long MemoryTotal { get; set; }
+    public long MemoryUsed { get; set; }
+    public double MemoryPercent { get; set; }
+}
+
+public sealed class FleetHostSnapshot
+{
+    public string ServerId { get; set; } = "";
+    public string ServerLabel { get; set; } = "";
+    public DateTimeOffset SampledAt { get; set; }
+    public DateTimeOffset? MetaSampledAt { get; set; }
+    public bool Reachable { get; set; }
+    public bool DockerOk { get; set; }
+    public string Reason { get; set; } = "";
+    public string DockerVersion { get; set; } = "";
+    public List<FleetContainerSnapshot> Containers { get; set; } = [];
+    public FleetHostResources Resources { get; set; } = new();
+    public DiskSnapshot? Disk { get; set; }
+    public List<CertbotCertificate> Certificates { get; set; } = [];
+}
+
+public sealed class FleetEvent
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public DateTimeOffset Timestamp { get; set; } = DateTimeOffset.Now;
+    public string Kind { get; set; } = "";
+    public string Severity { get; set; } = "info";
+    public string ServerId { get; set; } = "";
+    public string ServerLabel { get; set; } = "";
+    public string ContainerId { get; set; } = "";
+    public string ContainerName { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string Detail { get; set; } = "";
+    public int Count { get; set; } = 1;
+}
+
+public sealed class FleetIssue
+{
+    public string Severity { get; set; } = "warning";
+    public string Kind { get; set; } = "";
+    public string ServerId { get; set; } = "";
+    public string ServerLabel { get; set; } = "";
+    public string ContainerId { get; set; } = "";
+    public string ContainerName { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string Detail { get; set; } = "";
+    public string Feature { get; set; } = "";
+}
+
 public static class ByteFormatter
 {
     public static string Human(long bytes)

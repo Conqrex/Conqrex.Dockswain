@@ -10,6 +10,7 @@ KCM.SimpleKCM {
     property alias cfg_pollInterval: pollSpin.value
     property alias cfg_statsInterval: statsSpin.value
     property alias cfg_showStats: statsBox.checked
+    property alias cfg_useSystemTheme: sysThemeBox.checked
     property alias cfg_showCompose: composeBox.checked
     property alias cfg_confirmDestructive: confirmBox.checked
     property alias cfg_sshConnectTimeout: timeoutSpin.value
@@ -25,6 +26,22 @@ KCM.SimpleKCM {
     property alias cfg_fmPopupHeight: fmHeightSpin.value
     property alias cfg_confirmDelete: confirmDeleteBox.checked
     property alias cfg_showHiddenFiles: hiddenFilesBox.checked
+    property alias cfg_fleetDefaultView: fleetDefaultBox.checked
+    property alias cfg_fleetPollInterval: fleetPollSpin.value
+    property alias cfg_fleetDeepInterval: fleetDeepSpin.value
+    property alias cfg_fleetResourceMonitoring: resourceMonitorBox.checked
+    property alias cfg_fleetDiskMonitoring: diskMonitorBox.checked
+    property alias cfg_fleetSslMonitoring: sslMonitorBox.checked
+    property alias cfg_fleetImageMonitoring: imageMonitorBox.checked
+    property alias cfg_fleetNotifications: notificationsBox.checked
+    property alias cfg_fleetNotifyRecovery: recoveryBox.checked
+    property alias cfg_fleetCpuThreshold: cpuThresholdSpin.value
+    property alias cfg_fleetMemoryThreshold: memoryThresholdSpin.value
+    property alias cfg_fleetDiskThreshold: diskThresholdSpin.value
+    property alias cfg_fleetSslWarningDays: sslDaysSpin.value
+    property alias cfg_fleetRestartThreshold: restartThresholdSpin.value
+    property alias cfg_fleetRestartWindowMinutes: restartWindowSpin.value
+    property alias cfg_fleetEventHistoryLimit: historyLimitSpin.value
 
     property string cfg_dockerCmd: "docker"
     property string cfg_terminal: "konsole"
@@ -52,6 +69,11 @@ KCM.SimpleKCM {
             Component.onCompleted: editText = page.cfg_terminal
             onEditTextChanged: page.cfg_terminal = editText
         }
+        QQC2.CheckBox {
+            id: sysThemeBox
+            Kirigami.FormData.label: i18n("Colors:")
+            text: i18n("Use Plasma system colors")
+        }
 
         Item { Kirigami.FormData.isSection: true }
 
@@ -74,6 +96,103 @@ KCM.SimpleKCM {
             id: timeoutSpin
             from: 2; to: 60
             Kirigami.FormData.label: i18n("SSH connect timeout (s):")
+        }
+
+        Item {
+            Kirigami.FormData.isSection: true
+            Kirigami.FormData.label: i18n("Fleet Health")
+        }
+        QQC2.CheckBox {
+            id: fleetDefaultBox
+            text: i18n("Open Fleet Health by default")
+        }
+        QQC2.SpinBox {
+            id: fleetPollSpin
+            from: 10; to: 600; stepSize: 5
+            Kirigami.FormData.label: i18n("Health refresh (s):")
+        }
+        QQC2.SpinBox {
+            id: fleetDeepSpin
+            from: 300; to: 21600; stepSize: 300
+            Kirigami.FormData.label: i18n("Disk / SSL refresh (s):")
+        }
+        QQC2.CheckBox {
+            id: resourceMonitorBox
+            text: i18n("Monitor CPU and memory thresholds")
+        }
+        QQC2.SpinBox {
+            id: cpuThresholdSpin
+            from: 1; to: 1000; suffix: "%"
+            enabled: resourceMonitorBox.checked
+            Kirigami.FormData.label: i18n("Container CPU warning:")
+        }
+        QQC2.Label {
+            text: i18n("Docker CPU is measured per core: 100% is one full core, 200% is two.")
+            wrapMode: Text.WordWrap
+            opacity: 0.7
+            font: Kirigami.Theme.smallFont
+            enabled: resourceMonitorBox.checked
+        }
+        QQC2.SpinBox {
+            id: memoryThresholdSpin
+            from: 1; to: 100; suffix: "%"
+            enabled: resourceMonitorBox.checked
+            Kirigami.FormData.label: i18n("Memory warning:")
+        }
+        QQC2.CheckBox {
+            id: diskMonitorBox
+            text: i18n("Monitor Docker host disk pressure")
+        }
+        QQC2.SpinBox {
+            id: diskThresholdSpin
+            from: 1; to: 100; suffix: "%"
+            enabled: diskMonitorBox.checked
+            Kirigami.FormData.label: i18n("Disk warning:")
+        }
+        QQC2.CheckBox {
+            id: sslMonitorBox
+            text: i18n("Monitor certbot certificate expiry")
+        }
+        QQC2.SpinBox {
+            id: sslDaysSpin
+            from: 1; to: 180; suffix: i18n(" days")
+            enabled: sslMonitorBox.checked
+            Kirigami.FormData.label: i18n("SSL warning window:")
+        }
+        QQC2.CheckBox {
+            id: imageMonitorBox
+            text: i18n("Detect when a running container uses an older local image")
+        }
+        QQC2.SpinBox {
+            id: restartThresholdSpin
+            from: 1; to: 100
+            Kirigami.FormData.label: i18n("Restart warning count:")
+        }
+        QQC2.SpinBox {
+            id: restartWindowSpin
+            from: 5; to: 1440; stepSize: 5; suffix: i18n(" min")
+            Kirigami.FormData.label: i18n("Restart window:")
+        }
+        QQC2.CheckBox {
+            id: notificationsBox
+            text: i18n("Show KDE notifications for new warnings and failures")
+        }
+        QQC2.CheckBox {
+            id: recoveryBox
+            text: i18n("Also notify when problems recover")
+            enabled: notificationsBox.checked
+        }
+        QQC2.Label {
+            text: i18n("Choose alert types and project/container filters for each host on the Servers page.")
+            wrapMode: Text.WordWrap
+            opacity: 0.7
+            font: Kirigami.Theme.smallFont
+            enabled: notificationsBox.checked
+        }
+        QQC2.SpinBox {
+            id: historyLimitSpin
+            from: 50; to: 1000; stepSize: 50
+            Kirigami.FormData.label: i18n("Event history limit:")
         }
 
         Item { Kirigami.FormData.isSection: true }

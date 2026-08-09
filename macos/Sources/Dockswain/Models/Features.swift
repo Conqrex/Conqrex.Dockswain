@@ -25,14 +25,14 @@ struct ComposeProject: Identifiable, Decodable, Equatable {
 
 // MARK: - Disk usage & cleanup
 
-struct DiskInfo: Decodable, Equatable {
+struct DiskInfo: Codable, Equatable {
     let size: Int64
     let used: Int64
     let avail: Int64
     let usePct: String
 }
 
-struct DfEntry: Identifiable, Decodable, Equatable {
+struct DfEntry: Identifiable, Codable, Equatable {
     let type: String
     let count: String
     let active: String
@@ -86,7 +86,7 @@ struct ConfdFile: Identifiable, Decodable, Equatable {
 
 // MARK: - Certbot
 
-struct Cert: Identifiable, Decodable, Equatable {
+struct Cert: Identifiable, Codable, Equatable {
     let name: String
     let domains: String
     let expiry: String

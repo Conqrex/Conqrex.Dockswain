@@ -9,6 +9,12 @@ private keys, and private-key passphrases are stored in SecureStorage.
 
 ## Features
 
+- Fleet Health across every configured host, with separate SSH-offline and
+  Docker-unavailable states, container health/restart events, CPU/memory thresholds,
+  disk pressure, SSL expiry, and read-only local image drift detection.
+- Persistent bounded event history plus immediate restart and navigation actions.
+  Fleet polling runs while the mobile app is in the foreground; this release does
+  not register an OS background service or claim continuous background alerts.
 - Server profiles with password or pasted private-key authentication.
 - QR import from the Plasma widget: scan one server or an all-servers QR from mobile
   Settings. If the desktop QR includes secrets, they are stored into SecureStorage.
@@ -25,6 +31,9 @@ private keys, and private-key passphrases are stored in SecureStorage.
 
 Interactive terminal sessions are intentionally not embedded. The mobile `Exec`
 action runs a one-shot command through `docker exec ... sh -lc` and shows the output.
+
+Image awareness compares a running container's image ID with the image currently
+available for the same local tag. Dockswain Mobile never pulls images automatically.
 
 ## Build
 

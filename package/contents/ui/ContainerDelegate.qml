@@ -30,6 +30,18 @@ PlasmaComponents.ItemDelegate {
     hoverEnabled: true
     topPadding: Kirigami.Units.smallSpacing
     bottomPadding: Kirigami.Units.smallSpacing
+    leftPadding: Kirigami.Units.smallSpacing
+    rightPadding: Kirigami.Units.smallSpacing
+
+    background: Rectangle {
+        radius: Kirigami.Units.cornerRadius
+        color: del.hovered
+            ? Qt.alpha(Kirigami.Theme.highlightColor, 0.10)
+            : Qt.alpha(Kirigami.Theme.textColor, 0.035)
+        border.width: del.cat === "bad" ? 1 : 0
+        border.color: Qt.alpha(del.dotColor, 0.58)
+        Behavior on color { ColorAnimation { duration: Kirigami.Units.shortDuration } }
+    }
 
     readonly property string cat: Fmt.stateCategory(cstate)
     readonly property bool running: cstate === "running"
@@ -49,13 +61,22 @@ PlasmaComponents.ItemDelegate {
     contentItem: RowLayout {
         spacing: Kirigami.Units.smallSpacing
 
-        Rectangle {                                  // status dot
-            Layout.preferredWidth: Math.round(Kirigami.Units.iconSizes.small * 0.55)
+        Item {                                       // OctoPulse-style status ring
+            Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
             Layout.preferredHeight: width
-            Layout.leftMargin: Kirigami.Units.smallSpacing / 2
             Layout.alignment: Qt.AlignVCenter
-            radius: width / 2
-            color: del.dotColor
+            Rectangle {
+                anchors.fill: parent
+                radius: width / 2
+                color: Qt.alpha(del.dotColor, 0.12)
+                border.width: 2
+                border.color: del.dotColor
+            }
+            Rectangle {
+                anchors.centerIn: parent
+                width: 6; height: 6; radius: 3
+                color: del.dotColor
+            }
         }
 
         ColumnLayout {

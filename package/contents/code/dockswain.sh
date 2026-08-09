@@ -16,7 +16,8 @@
 #       the profile's filename), so there is no copy-paste into the widget.
 #
 #   dockswain.sh <sub> <user@host> <port> <keyOrEmpty> [args...]
-#       sub = probe | list | stats | compose | action | compose-action
+#       sub = probe | list | stats | fleet-health | fleet-meta | compose
+#             | action | compose-action
 #
 # Env overrides (set by the widget): CNQ_DOCKER_CMD (default "docker"),
 #   CNQ_SSH_TIMEOUT (default 5).
@@ -244,6 +245,22 @@ if [ "$SUB" = "local-delete" ]; then
     exit 0
 fi
 
+# Send a native freedesktop notification on the Plasma desktop. This is kept in
+# the helper (rather than hand-building a shell command in QML) so titles/details
+# remain argv values and never become executable shell text.
+if [ "$SUB" = "notify" ]; then
+    TITLE="${1:-Dockswain}"; BODY="${2:-}"; URGENCY="${3:-normal}"
+    case "$URGENCY" in low|normal|critical) ;; *) URGENCY=normal ;; esac
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send --app-name="Dockswain" --icon="network-server" \
+            --urgency="$URGENCY" "$TITLE" "$BODY" >/dev/null 2>&1
+        printf '{"ok":true}\n'
+    else
+        emit_err "notify_unavailable"
+    fi
+    exit 0
+fi
+
 # filezilla-hosts: parse ~/.config/filezilla/sitemanager.xml, SFTP entries only.
 if [ "$SUB" = "filezilla-hosts" ]; then
     FZ="${HOME}/.config/filezilla/sitemanager.xml"
@@ -464,15 +481,21 @@ SSH+=("$TARGET")
 
 SSH_OUT=""; SSH_ERR=""; SSH_RC=0
 ssh_exec() {
-    local errf; errf=$(mktemp 2>/dev/null) || { SSH_RC=99; return; }
-    SSH_OUT=$("${SSH[@]}" "$1" 2>"$errf"); SSH_RC=$?
+    local errf remote_cmd
+    errf=$(mktemp 2>/dev/null) || { SSH_RC=99; return; }
+    # OpenSSH hands a remote command to the account's login shell. Explicitly
+    # enter POSIX sh so multiline probes also work for Fish/Zsh login accounts.
+    remote_cmd="sh -c '$(rsq "$1")'"
+    SSH_OUT=$("${SSH[@]}" "$remote_cmd" 2>"$errf"); SSH_RC=$?
     SSH_ERR=$(cat "$errf" 2>/dev/null); rm -f "$errf"
 }
 
 # classify a non-zero ssh/docker result into a stable reason code
 classify() {
     local e="$SSH_ERR"
-    if echo "$e" | grep -qiE 'docker daemon socket|cannot connect to the docker daemon'; then
+    if echo "$e" | grep -qiE 'sudo:.*(password is required|terminal is required|no tty|askpass)|must have a tty to run sudo'; then
+        echo "sudo_password"
+    elif echo "$e" | grep -qiE 'docker daemon socket|cannot connect to the docker daemon'; then
         if echo "$e" | grep -qiE 'permission denied'; then echo "docker_permission"; else echo "docker_down"; fi
     elif echo "$e" | grep -qiE 'docker: command not found|not found'; then echo "docker_missing"
     elif echo "$e" | grep -qiE 'permission denied \(|publickey|password|authenticat'; then echo "ssh_auth"
@@ -522,6 +545,152 @@ list)
         } ]' 2>/dev/null)
     [ -n "$containers" ] || containers="[]"
     printf '{"ok":true,"reachable":true,"containers":%s}\n' "$containers"
+    ;;
+
+# fleet-health: one lightweight operational sample. Unlike `list`, this enriches
+# every container with inspect state (health, exit/restart counters, image id),
+# current local tag state, live docker stats, and host memory/load. It is additive:
+# the existing list/stats contracts stay unchanged for the interactive views.
+fleet-health)
+    WANT_STATS="${1:-1}"; [[ "$WANT_STATS" =~ ^[01]$ ]] || WANT_STATS=1
+    remote=$(cat <<REMOTE
+printf '%s\n' '@@VERSION@@'
+$DOCKER version --format '{{.Server.Version}}' || exit \$?
+printf '%s\n' '@@PS@@'
+$DOCKER ps -a --no-trunc --format '{{json .}}' || exit \$?
+ids=\$($DOCKER ps -aq --no-trunc 2>/dev/null)
+printf '%s\n' '@@INSPECT@@'
+[ -z "\$ids" ] || $DOCKER inspect --format '{{json .}}' \$ids
+printf '%s\n' '@@STATS@@'
+if [ '$WANT_STATS' = 1 ]; then $DOCKER stats --no-stream --format '{{json .}}' 2>/dev/null || true; fi
+printf '%s\n' '@@IMAGES@@'
+if [ -n "\$ids" ]; then
+  $DOCKER inspect --format '{{.Config.Image}}' \$ids 2>/dev/null | sort -u | while IFS= read -r ref; do
+    [ -n "\$ref" ] || continue
+    printf '%s\t' "\$ref"
+    $DOCKER image inspect --format '{{.Id}}|{{.Created}}|{{json .RepoTags}}|{{json .RepoDigests}}' "\$ref" 2>/dev/null || printf '||[]|[]\n'
+  done
+fi
+printf '%s\n' '@@HOST@@'
+cpus=\$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
+load1=\$(awk '{print \$1}' /proc/loadavg 2>/dev/null || echo 0)
+awk -v cpus="\$cpus" -v load1="\$load1" '
+  /MemTotal:/ { total=\$2*1024 }
+  /MemAvailable:/ { avail=\$2*1024 }
+  END { used=total-avail; pct=(total>0 ? used*100/total : 0);
+        printf "{\"cpus\":%d,\"load1\":%.2f,\"memoryTotal\":%.0f,\"memoryUsed\":%.0f,\"memoryPct\":%.2f}\n", cpus, load1, total, used, pct }' /proc/meminfo
+REMOTE
+)
+    ssh_exec "$remote"
+    if [ "$SSH_RC" -ne 0 ]; then
+        reason=$(classify); reachable=true
+        case "$reason" in ssh_auth|dns|refused|timeout|unreachable|ssh_error) reachable=false;; esac
+        printf '{"ok":false,"reachable":%s,"dockerOk":false,"reason":"%s"}\n' "$reachable" "$reason"
+        exit 0
+    fi
+
+    section() {
+        local from="$1" to="$2"
+        printf '%s\n' "$SSH_OUT" | awk -v a="@@${from}@@" -v b="@@${to}@@" '
+            $0==a { on=1; next } $0==b { exit } on { print }'
+    }
+    version=$(section VERSION PS | head -1 | tr -d '\r')
+    psjson=$(section PS INSPECT | jq -sc '
+        [ .[] | {
+          id:(.ID // "" | .[0:12]), fullId:(.ID // ""), name:(.Names // ""),
+          image:(.Image // ""), state:(.State // "" | ascii_downcase),
+          status:(.Status // ""), ports:(.Ports // ""),
+          networks:(.Networks // ""), created:(.CreatedAt // "")
+        } ]' 2>/dev/null)
+    [ -n "$psjson" ] || psjson="[]"
+    inspect=$(section INSPECT STATS | jq -sc '
+        reduce .[] as $c ({}; .[$c.Id] = {
+          restartCount:($c.RestartCount // 0), exitCode:($c.State.ExitCode // 0),
+          health:($c.State.Health.Status // ""), startedAt:($c.State.StartedAt // ""),
+          finishedAt:($c.State.FinishedAt // ""), imageRef:($c.Config.Image // ""),
+          imageId:($c.Image // ""),
+          project:($c.Config.Labels["com.docker.compose.project"]
+                   // $c.Config.Labels["com.docker.stack.namespace"] // ""),
+          service:($c.Config.Labels["com.docker.compose.service"]
+                   // $c.Config.Labels["com.docker.swarm.service.name"] // "")
+        })' 2>/dev/null)
+    [ -n "$inspect" ] || inspect="{}"
+    stats=$(section STATS IMAGES | jq -sc '
+        reduce .[] as $s ({}; .[($s.ID // "" | .[0:12])] = {
+          cpu:($s.CPUPerc // ""), mem:($s.MemPerc // ""),
+          memUsage:($s.MemUsage // ""), net:($s.NetIO // ""),
+          block:($s.BlockIO // ""), pids:($s.PIDs // "")
+        })' 2>/dev/null)
+    [ -n "$stats" ] || stats="{}"
+    images=$(section IMAGES HOST | jq -Rsc '
+        split("\n") | map(select(length>0)) | map(split("\t")) |
+        reduce .[] as $row ({}; (($row[1] // "") | split("|")) as $i |
+          .[$row[0]] = {
+            ref:($row[0] // ""), id:($i[0] // ""), created:($i[1] // ""),
+            tags:(try ($i[2] | fromjson) catch []),
+            digests:(try ($i[3] | fromjson) catch [])
+          })' 2>/dev/null)
+    [ -n "$images" ] || images="{}"
+    host=$(printf '%s\n' "$SSH_OUT" | awk 'f{print;exit} /^@@HOST@@$/{f=1}' | jq -c '.' 2>/dev/null)
+    [ -n "$host" ] || host='{"cpus":0,"load1":0,"memoryTotal":0,"memoryUsed":0,"memoryPct":0}'
+
+    # Stream the intermediate documents over stdin. Large hosts can easily exceed
+    # ARG_MAX if container/inspect JSON is passed through repeated --argjson flags.
+    containers=$(printf '%s\n%s\n%s\n%s\n' "$psjson" "$inspect" "$stats" "$images" | jq -sc '
+      .[0] as $ps | .[1] as $ins | .[2] as $stats | .[3] as $images |
+      [ $ps[] | . as $p | ($ins[$p.fullId] // {}) as $i |
+        ($stats[$p.id] // {}) as $s | (($i.imageRef // "") | if .=="" then $p.image else . end) as $ref |
+        ($images[$ref] // {}) as $img |
+        $p + $i + $s + {
+          imageRef:$ref, currentImageId:($img.id // ""), imageCreated:($img.created // ""),
+          imageDigests:($img.digests // []),
+          imageUpdate:(($ref | contains("@sha256:") | not) and
+                       ($img.id // "") != "" and ($i.imageId // "") != "" and $img.id != $i.imageId),
+          imagePinned:($ref | contains("@sha256:"))
+        }
+      ]')
+    image_list=$(printf '%s' "$images" | jq -c '[to_entries[].value]' 2>/dev/null)
+    [ -n "$image_list" ] || image_list="[]"
+    printf '%s\n%s\n%s\n' "$containers" "$host" "$image_list" | jq -sc --arg v "$version" '
+        .[0] as $c | .[1] as $h | .[2] as $i |
+        {ok:true,reachable:true,dockerOk:true,version:$v,imageAwarenessVersion:2,
+         containers:$c,host:$h,images:$i}'
+    ;;
+
+# fleet-meta: slower checks used by the overview (filesystem pressure, Docker
+# reclaimable space, and certbot expiry). It deliberately performs no cleanup and
+# does not pull images, so background monitoring never changes a server.
+fleet-meta)
+    WANT_DISK="${1:-1}"; WANT_SSL="${2:-1}"
+    [[ "$WANT_DISK" =~ ^[01]$ ]] || WANT_DISK=1
+    [[ "$WANT_SSL" =~ ^[01]$ ]] || WANT_SSL=1
+    disk='null'; sysdf='[]'; certs='[]'; certbot=false
+    if [ "$WANT_DISK" = 1 ]; then
+        remote='root=$('"$DOCKER"' info --format "{{.DockerRootDir}}" 2>/dev/null); [ -n "$root" ] || root=/var/lib/docker; df -PB1 "$root" 2>/dev/null | awk '\''NR==2{print $2" "$3" "$4" "$5}'\''; echo "@@DF@@"; '"$DOCKER"' system df --format "{{json .}}" 2>/dev/null'
+        ssh_exec "$remote"
+        if [ "$SSH_RC" -ne 0 ] && [ -z "$SSH_OUT" ]; then emit_err "$(classify)"; fi
+        read -r dsize dused davail dusep <<< "$(printf '%s\n' "$SSH_OUT" | awk '/^@@DF@@/{exit} {print}')"
+        sysdf=$(printf '%s\n' "$SSH_OUT" | awk 'f{print} /^@@DF@@/{f=1}' | jq -sc '
+          [ .[] | {type:.Type,count:.TotalCount,active:.Active,size:.Size,reclaimable:.Reclaimable} ]' 2>/dev/null)
+        [ -n "$sysdf" ] || sysdf="[]"
+        disk=$(jq -nc --arg s "${dsize:-}" --arg u "${dused:-}" --arg a "${davail:-}" --arg p "${dusep:-}" \
+          '{size:($s|tonumber? // 0),used:($u|tonumber? // 0),avail:($a|tonumber? // 0),usePct:$p}')
+    fi
+    if [ "$WANT_SSL" = 1 ]; then
+        ssh_exec "command -v certbot >/dev/null 2>&1 || { echo @@NOCERTBOT@@; exit 0; }; ${SUDO:+$SUDO }certbot certificates 2>/dev/null"
+        if ! printf '%s' "$SSH_OUT" | grep -q '@@NOCERTBOT@@'; then
+            certbot=true
+            certs=$(printf '%s\n' "$SSH_OUT" | awk '
+              function emit(){if(have) printf "%s\t%s\t%s\t%s\n",name,dom,edate,valid}
+              /Certificate Name:/{emit();name=$0;sub(/^[[:space:]]*Certificate Name:[[:space:]]*/,"",name);dom="";edate="";valid="";have=1;next}
+              /Domains:/{d=$0;sub(/^[[:space:]]*Domains:[[:space:]]*/,"",d);dom=d;next}
+              /Expiry Date:/{e=$0;sub(/^[[:space:]]*Expiry Date:[[:space:]]*/,"",e);edate=e;sub(/[[:space:]]*\(.*/,"",edate);valid="";if(index(e,"(")>0){valid=e;sub(/.*\(/,"",valid);sub(/\).*/,"",valid)};next}
+              END{emit()}' | jq -Rsc 'split("\n")|map(select(length>0))|map(split("\t"))|
+                map({name:.[0],domains:(.[1]//""),expiry:(.[2]//""),valid:(.[3]//"")})' 2>/dev/null)
+            [ -n "$certs" ] || certs="[]"
+        fi
+    fi
+    printf '{"ok":true,"disk":%s,"df":%s,"certbot":%s,"certs":%s}\n' "$disk" "$sysdf" "$certbot" "$certs"
     ;;
 
 stats)

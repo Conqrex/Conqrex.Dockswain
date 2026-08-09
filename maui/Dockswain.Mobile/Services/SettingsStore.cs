@@ -6,6 +6,8 @@ namespace Dockswain.Mobile.Services;
 public sealed class SettingsStore
 {
     private const string ServersKey = "dockswain.servers.v1";
+    private const string FleetEventsKey = "dockswain.fleet.events.v1";
+    private const string FleetSnapshotsKey = "dockswain.fleet.snapshots.v1";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = false
@@ -28,6 +30,26 @@ public sealed class SettingsStore
     {
         Preferences.Default.Set(ServersKey, JsonSerializer.Serialize(servers, JsonOptions));
         return Task.CompletedTask;
+    }
+
+    public Task<List<FleetEvent>> LoadFleetEventsAsync() => LoadJsonAsync<List<FleetEvent>>(FleetEventsKey, []);
+    public Task SaveFleetEventsAsync(IReadOnlyCollection<FleetEvent> events)
+    {
+        Preferences.Default.Set(FleetEventsKey, JsonSerializer.Serialize(events, JsonOptions));
+        return Task.CompletedTask;
+    }
+    public Task<Dictionary<string, FleetHostSnapshot>> LoadFleetSnapshotsAsync()
+        => LoadJsonAsync<Dictionary<string, FleetHostSnapshot>>(FleetSnapshotsKey, []);
+    public Task SaveFleetSnapshotsAsync(IReadOnlyDictionary<string, FleetHostSnapshot> snapshots)
+    {
+        Preferences.Default.Set(FleetSnapshotsKey, JsonSerializer.Serialize(snapshots, JsonOptions));
+        return Task.CompletedTask;
+    }
+
+    private static Task<T> LoadJsonAsync<T>(string key, T fallback)
+    {
+        try { return Task.FromResult(JsonSerializer.Deserialize<T>(Preferences.Default.Get(key, ""), JsonOptions) ?? fallback); }
+        catch { return Task.FromResult(fallback); }
     }
 
     public Task<string> GetPasswordAsync(ServerProfile server)

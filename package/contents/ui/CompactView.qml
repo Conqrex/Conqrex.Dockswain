@@ -5,15 +5,16 @@ import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.components as PlasmaComponents
 import org.kde.kirigami as Kirigami
 
-// Panel/compact view: the custom icon with a running/total badge and a
-// reachability dot. Click toggles the popup.
+// Panel/compact view: fleet-wide status, not merely the selected server tab.
 MouseArea {
     id: ca
 
-    property bool reachable: false
-    property bool dockerOk: false
-    property int runningCount: 0
-    property int totalCount: 0
+    property int hostCount: 0
+    property int observedCount: 0
+    property int onlineCount: 0
+    property int healthyCount: 0
+    property int warningCount: 0
+    property int criticalCount: 0
     property url iconSource
 
     signal toggleRequested()
@@ -45,7 +46,7 @@ MouseArea {
                 sourceSize.height: 128
                 fillMode: Image.PreserveAspectFit
                 smooth: true
-                opacity: ca.reachable ? 1.0 : 0.55
+                opacity: ca.hostCount === 0 ? 0.55 : 1.0
             }
 
             // reachability dot, bottom-right
@@ -55,20 +56,29 @@ MouseArea {
                 radius: width / 2
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
-                color: !ca.reachable ? Kirigami.Theme.negativeTextColor
-                     : !ca.dockerOk  ? Kirigami.Theme.neutralTextColor
-                     :                 Kirigami.Theme.positiveTextColor
+                color: ca.criticalCount > 0 ? Kirigami.Theme.negativeTextColor
+                     : ca.warningCount > 0 ? Kirigami.Theme.neutralTextColor
+                     : ca.observedCount < ca.hostCount ? Kirigami.Theme.disabledTextColor
+                     : ca.hostCount > 0 && ca.onlineCount === ca.hostCount
+                       ? Kirigami.Theme.positiveTextColor
+                       : Kirigami.Theme.textColor
                 border.width: Math.max(1, width * 0.12)
                 border.color: Kirigami.Theme.backgroundColor
             }
         }
 
         PlasmaComponents.Label {
-            visible: ca.horizontal && ca.dockerOk && ca.width > Kirigami.Units.gridUnit * 3.5
-            text: ca.runningCount + "/" + ca.totalCount
+            visible: ca.horizontal && ca.hostCount > 0 && ca.width > Kirigami.Units.gridUnit * 3.5
+            text: ca.criticalCount > 0 ? ("!" + ca.criticalCount)
+                : ca.warningCount > 0 ? ("⚠" + ca.warningCount)
+                : ca.observedCount < ca.hostCount ? (ca.observedCount + "/" + ca.hostCount + "…")
+                : ca.onlineCount + "/" + ca.hostCount
             font.bold: true
             font.family: "monospace"
-            color: ca.runningCount > 0 ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.textColor
+            color: ca.criticalCount > 0 ? Kirigami.Theme.negativeTextColor
+                 : ca.warningCount > 0 ? Kirigami.Theme.neutralTextColor
+                 : ca.observedCount < ca.hostCount ? Kirigami.Theme.disabledTextColor
+                 : Kirigami.Theme.positiveTextColor
             Layout.alignment: Qt.AlignVCenter
         }
     }

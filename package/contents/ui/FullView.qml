@@ -12,11 +12,34 @@ Item {
 
     property var ctrl
 
-    Layout.minimumWidth: Kirigami.Units.gridUnit * 18
-    Layout.minimumHeight: Kirigami.Units.gridUnit * 16
+    implicitWidth: Kirigami.Units.gridUnit * 30
+    implicitHeight: Kirigami.Units.gridUnit * 32
+    Layout.minimumWidth: Kirigami.Units.gridUnit * 24
+    Layout.minimumHeight: Kirigami.Units.gridUnit * 24
     // grow the popup while the file manager is open so the dual pane has room
-    Layout.preferredWidth: Kirigami.Units.gridUnit * (fmOverlay.visible ? Plasmoid.configuration.fmPopupWidth : 24)
-    Layout.preferredHeight: Kirigami.Units.gridUnit * (fmOverlay.visible ? Plasmoid.configuration.fmPopupHeight : 28)
+    Layout.preferredWidth: Kirigami.Units.gridUnit * (fmOverlay.visible ? Plasmoid.configuration.fmPopupWidth : 30)
+    Layout.preferredHeight: Kirigami.Units.gridUnit * (fmOverlay.visible ? Plasmoid.configuration.fmPopupHeight : 32)
+
+    // Shared Conqrex widget palette, matching OctoPulse and CrewBeacon.
+    // One theme scope keeps every native Plasma/Kirigami control coherent.
+    readonly property bool sysTheme: Plasmoid.configuration.useSystemTheme
+    Kirigami.Theme.inherit: sysTheme
+    Kirigami.Theme.colorSet: Kirigami.Theme.View
+    Kirigami.Theme.backgroundColor: "#0d1526"
+    Kirigami.Theme.textColor: "#e6edf3"
+    Kirigami.Theme.disabledTextColor: "#8b96a5"
+    Kirigami.Theme.highlightColor: "#3b82f6"
+    Kirigami.Theme.positiveTextColor: "#3fb950"
+    Kirigami.Theme.negativeTextColor: "#f85149"
+    Kirigami.Theme.neutralTextColor: "#d29922"
+
+    Rectangle {
+        anchors.fill: parent
+        anchors.margins: -Kirigami.Units.smallSpacing
+        visible: !fullView.sysTheme
+        radius: Kirigami.Units.cornerRadius
+        color: "#0d1526"
+    }
 
     readonly property bool ready: ctrl.active && ctrl.reachable && ctrl.dockerOk
     readonly property bool hasList: ready && ctrl.containerModel.count > 0
@@ -304,8 +327,15 @@ Item {
         confirmDialog.open();
     }
 
+    FleetView {
+        anchors.fill: parent
+        visible: ctrl.showFleet
+        ctrl: fullView.ctrl
+    }
+
     // ==================== main content ====================
     ColumnLayout {
+        visible: !ctrl.showFleet
         anchors.fill: parent
         anchors.margins: Kirigami.Units.smallSpacing
         spacing: Kirigami.Units.smallSpacing
@@ -317,10 +347,22 @@ Item {
 
             Image {
                 source: ctrl.iconSource
-                Layout.preferredWidth: Kirigami.Units.iconSizes.medium
-                Layout.preferredHeight: Kirigami.Units.iconSizes.medium
+                Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
+                Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
                 sourceSize.width: 128; sourceSize.height: 128
                 fillMode: Image.PreserveAspectFit; smooth: true
+            }
+            PlasmaComponents.Label {
+                text: i18n("Dockswain")
+                font.bold: true
+            }
+            QQC2.Button {
+                text: i18n("Fleet")
+                icon.name: ctrl.fleet.criticalProblemCount > 0 ? "dialog-error"
+                         : ctrl.fleet.problemCount > 0 ? "dialog-warning" : "emblem-success"
+                flat: true
+                onClicked: ctrl.showFleetOverview()
+                PlasmaComponents.ToolTip { text: i18n("Open Fleet Health") }
             }
             // --- tab strip: one tab per open server, each a live connection ---
             ListView {
@@ -519,6 +561,7 @@ Item {
                 ListView {
                     model: ctrl.containerModel
                     clip: true
+                    spacing: Kirigami.Units.smallSpacing / 2
                     boundsBehavior: Flickable.StopAtBounds
                     highlight: PlasmaExtras.Highlight {}
                     highlightMoveDuration: Kirigami.Units.shortDuration
@@ -532,8 +575,8 @@ Item {
                     section.delegate: Rectangle {
                         width: ListView.view ? ListView.view.width : 0
                         height: Math.round(Kirigami.Units.gridUnit * 1.5)
-                        color: Qt.rgba(Kirigami.Theme.highlightColor.r, Kirigami.Theme.highlightColor.g,
-                                       Kirigami.Theme.highlightColor.b, 0.10)
+                        color: Qt.alpha(Kirigami.Theme.highlightColor, 0.10)
+                        radius: Kirigami.Units.cornerRadius
 
                         Rectangle {        // left accent bar
                             anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
@@ -684,6 +727,14 @@ Item {
         onTriggered: {
             var a = Plasmoid.internalAction ? Plasmoid.internalAction("configure") : null;
             if (a) a.trigger();
+        }
+    }
+
+    Connections {
+        target: ctrl
+        function onFeatureRequested(feature) {
+            if (feature === "disk") fullView.openDisk();
+            else if (feature === "nginx") fullView.openNginx();
         }
     }
 

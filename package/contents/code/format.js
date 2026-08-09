@@ -72,6 +72,42 @@ function pctFraction(s) {
     return Math.max(0, Math.min(1, v / 100));
 }
 
+// Percentage text from docker/df ("82.4%") -> numeric 82.4.
+function pctNumber(s) {
+    var v = parseFloat(("" + (s === undefined ? "" : s)).replace("%", ""));
+    return isNaN(v) ? 0 : v;
+}
+
+// Docker size text ("18.2GB", "900 MiB", optional "(42%)") -> bytes.
+function dockerBytes(s) {
+    var m = ("" + (s || "")).replace(/\([^)]*\)/g, "").trim()
+        .match(/^([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?i?b)?/i);
+    if (!m) return 0;
+    var n = parseFloat(m[1]), u = (m[2] || "B").toUpperCase();
+    var decimal = u.indexOf("I") < 0;
+    var base = decimal ? 1000 : 1024;
+    var lead = u.charAt(0), powers = {K:1, M:2, G:3, T:4, P:5, E:6};
+    return n * Math.pow(base, powers[lead] || 0);
+}
+
+// Certbot emits "YYYY-MM-DD HH:mm:ss+00:00". Date.parse is happier with ISO T.
+function certificateDays(expiry, nowMs) {
+    var raw = ("" + (expiry || "")).trim();
+    if (!raw) return 999999;
+    var iso = raw.replace(/^([0-9]{4}-[0-9]{2}-[0-9]{2})\s+/, "$1T");
+    var ms = Date.parse(iso);
+    if (isNaN(ms)) ms = Date.parse(raw);
+    return isNaN(ms) ? 999999 : Math.floor((ms - (nowMs || Date.now())) / 86400000);
+}
+
+function ageText(ms, nowMs) {
+    var d = Math.max(0, (nowMs || Date.now()) - Number(ms || 0));
+    if (d < 60000) return "now";
+    if (d < 3600000) return Math.floor(d / 60000) + "m";
+    if (d < 86400000) return Math.floor(d / 3600000) + "h";
+    return Math.floor(d / 86400000) + "d";
+}
+
 // container's primary docker network for grouping. docker ps lists .Networks in a
 // non-stable order, and swarm tasks sit on infra nets (ingress/docker_gwbridge) plus
 // their app net. deprioritize infra and sort so the choice is deterministic: a swarm

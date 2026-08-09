@@ -22,6 +22,7 @@ PlasmoidItem {
     }
     property var openTabs: loadOpenTabs()    // array of server indices, persisted
     property int activeTab: 0
+    property bool showFleet: Plasmoid.configuration.fleetDefaultView
 
     function loadOpenTabs() {
         var arr = [];
@@ -46,7 +47,17 @@ PlasmoidItem {
         if (activeTab >= openTabs.length) activeTab = Math.max(0, openTabs.length - 1);
         syncActive();
     }
-    function setActiveTab(i) { if (i >= 0 && i < openTabs.length) activeTab = i; }
+    function setActiveTab(i) {
+        if (i >= 0 && i < openTabs.length) { activeTab = i; showFleet = false; }
+    }
+    function showFleetOverview() { showFleet = true; }
+    function openFleetServer(serverIdx, feature) {
+        openServerTab(serverIdx);
+        // A newly opened tab is instantiated on the next QML turn. Defer feature
+        // navigation so Disk/nginx requests bind to the requested session.
+        if (feature) Qt.callLater(function () { featureRequested(feature); });
+    }
+    signal featureRequested(string feature)
 
     // drop tabs whose server was removed/reordered in settings
     onServersChanged: {
@@ -77,6 +88,26 @@ PlasmoidItem {
     }
     onActiveTabChanged: syncActive()
     Component.onCompleted: syncActive()
+
+    // Fleet monitoring is separate from open interactive tabs. Every configured
+    // server gets a lightweight monitor and therefore remains visible in health,
+    // alerts and history even when its tab is closed.
+    FleetController {
+        id: fleetController
+        mainRoot: root
+        servers: root.servers
+    }
+    readonly property var fleet: fleetController
+    function receiveFleetHealth(serverIndex, data) { fleetController.receiveFleetHealth(serverIndex, data); }
+    function receiveFleetMeta(serverIndex, data) { fleetController.receiveFleetMeta(serverIndex, data); }
+    function refreshFleet() { fleetController.refreshAll(); }
+    function refreshFleetHost(serverIndex) { fleetController.refreshHost(serverIndex); }
+    function restartFleetContainer(serverIndex, id) { fleetController.restartContainer(serverIndex, id); }
+    function clearFleetEvents() { fleetController.clearEvents(); }
+    function openSettings() {
+        var action = Plasmoid.internalAction("configure");
+        if (action) action.trigger();
+    }
 
     // --- shared view state -------------------------------------------------
     property bool hideExited: Plasmoid.configuration.hideExitedDefault
@@ -199,16 +230,22 @@ PlasmoidItem {
 
     // --- representations ---------------------------------------------------
     toolTipMainText: i18n("Dockswain")
-    toolTipSubText: !active ? i18n("No server configured")
-                  : !reachable ? i18n("%1 — unreachable", active.label || targetStr())
-                  : !dockerOk ? i18n("%1 — docker error (%2)", active.label || targetStr(), reason)
-                  : i18n("%1 — %2/%3 running", active.label || targetStr(), runningCount, totalCount)
+    toolTipSubText: servers.length === 0 ? i18n("No server configured")
+                  : fleet.checkingCount > 0
+                    ? i18np("Collecting status from %1 host", "Collecting status from %1 hosts", fleet.checkingCount)
+                  : fleet.criticalProblemCount > 0
+                    ? i18np("%1 critical fleet problem", "%1 critical fleet problems", fleet.criticalProblemCount)
+                  : fleet.problemCount > 0
+                    ? i18np("%1 fleet warning", "%1 fleet warnings", fleet.problemCount)
+                  : i18n("%1 hosts online · %2 healthy containers", fleet.onlineCount, fleet.healthyCount)
 
     compactRepresentation: CompactView {
-        reachable: root.reachable
-        dockerOk: root.dockerOk
-        runningCount: root.runningCount
-        totalCount: root.totalCount
+        hostCount: root.fleet.hostCount
+        observedCount: root.fleet.observedCount
+        onlineCount: root.fleet.onlineCount
+        healthyCount: root.fleet.healthyCount
+        warningCount: root.fleet.warningProblemCount
+        criticalCount: root.fleet.criticalProblemCount
         iconSource: root.iconSource
         onToggleRequested: root.expanded = !root.expanded
     }

@@ -87,6 +87,15 @@ it reuses the same socket and returns in milliseconds.
 
 ## Features
 
+- **Fleet Health:** continuously checks every configured host, not just open tabs,
+  and separates SSH-offline from Docker-unavailable states. It reports unhealthy
+  containers, restart bursts, CPU/memory thresholds, disk pressure, expiring SSL
+  certificates, and locally available image changes.
+- **Event history and alerts:** a bounded transition history survives restarts;
+  macOS notifications can report new problems and optional recoveries. The first
+  observation establishes a silent baseline.
+- **Immediate actions:** restart an affected container or jump from a fleet issue
+  to Containers, Disk Cleanup, or Certificates.
 - **Multiple servers as tabs:** open several configured servers at once, each its
   own live connection; switch instantly, "+" opens another, "×" closes one. Open
   tabs persist across restarts (only the active tab fetches CPU/mem stats).
@@ -113,6 +122,10 @@ it reuses the same socket and returns in milliseconds.
 
 Everything runs over one multiplexed SSH connection, so polls and actions return in
 milliseconds and interactive terminals/transfers don't re-authenticate.
+
+Image checks compare a running container with the image currently stored under its
+local tag. They are read-only: the app never performs an automatic image pull or
+presents the result as a registry update check.
 
 ## License
 

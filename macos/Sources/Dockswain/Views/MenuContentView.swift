@@ -9,6 +9,7 @@ struct MenuContentView: View {
 
     enum Screen: Equatable {
         case list
+        case fleet
         case logs(Container)
         case settings
         case compose
@@ -17,12 +18,14 @@ struct MenuContentView: View {
         case nginx
         case certbot(prefill: String)
     }
-    @State private var screen: Screen = .list
+    @State private var screen: Screen = .fleet
+    @State private var choseInitialScreen = false
 
     var body: some View {
         VStack(spacing: 0) {
             switch screen {
             case .list:           listScreen
+            case .fleet:          FleetHealthView { openFleetFeature($0) }
             case .logs(let c):    LogsView(container: c) { screen = .list }
             case .settings:       SettingsView { screen = .list }
             case .compose:        ComposeView { screen = .list }
@@ -31,6 +34,21 @@ struct MenuContentView: View {
             case .nginx:          NginxView(openCertbot: { screen = .certbot(prefill: $0) }) { screen = .list }
             case .certbot(let prefill): CertbotView(prefill: prefill) { screen = .nginx }
             }
+        }
+        .onAppear {
+            if !choseInitialScreen {
+                choseInitialScreen = true
+                screen = state.fleetDefaultView ? .fleet : .list
+            }
+        }
+    }
+
+    private func openFleetFeature(_ feature: String) {
+        switch feature {
+        case "disk": screen = .disk
+        case "nginx": screen = .nginx
+        case "settings": screen = .settings
+        default: screen = .list
         }
     }
 
@@ -124,6 +142,7 @@ struct MenuContentView: View {
 
     private var toolbar: some View {
         HStack(alignment: .top, spacing: 6) {
+            toolButton("heart.text.square", "Fleet", "Fleet Health") { screen = .fleet }
             if state.showCompose {
                 toolButton("rectangle.3.group", "Compose", "Compose projects") { screen = .compose }
             }

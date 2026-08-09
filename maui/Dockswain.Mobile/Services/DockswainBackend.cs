@@ -37,6 +37,118 @@ public sealed partial class DockswainBackend(RemoteShell shell)
         };
     }
 
+    /// Read-only operational sample used by the all-server Fleet view. Docker
+    /// inspect supplies restart/health/image identity while docker stats supplies
+    /// resource usage. No image is pulled and no server state is changed.
+    public async Task<FleetHostSnapshot> FleetHealthAsync(ServerProfile server, bool resources = true,
+        CancellationToken cancellationToken = default)
+    {
+        var label = server.DisplayName;
+        try
+        {
+            var containersTask = ListContainersAsync(server, cancellationToken);
+            var statsTask = resources ? StatsAsync(server, cancellationToken)
+                                      : Task.FromResult<Dictionary<string, ContainerStat>>([]);
+            var versionTask = shell.RunCheckedAsync(server,
+                $"{shell.Docker(server)} version --format '{{{{.Server.Version}}}}'", cancellationToken);
+            await Task.WhenAll(containersTask, statsTask, versionTask).ConfigureAwait(false);
+            var containers = await containersTask.ConfigureAwait(false);
+            var stats = await statsTask.ConfigureAwait(false);
+
+            var details = new Dictionary<string, (int Restarts, int Exit, string Health, string Ref, string ImageId, string FinishedAt)>();
+            if (containers.Count > 0)
+            {
+                var ids = string.Join(" ", containers.Select(c => RemoteShell.Quote(c.Id)));
+                var inspect = await RunDockerCheckedAsync(server,
+                    $"{shell.Docker(server)} inspect --format '{{{{json .}}}}' {ids}", cancellationToken).ConfigureAwait(false);
+                foreach (var line in inspect.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                {
+                    using var doc = JsonDocument.Parse(line);
+                    var root = doc.RootElement;
+                    var id = GetJsonString(root, "Id");
+                    var state = GetJsonValue(root, "State");
+                    var config = GetJsonValue(root, "Config");
+                    var health = state.ValueKind == JsonValueKind.Object && state.TryGetProperty("Health", out var healthObj)
+                              && healthObj.ValueKind == JsonValueKind.Object ? GetJsonString(healthObj, "Status") : "";
+                    details[id] = (GetJsonInt(root, "RestartCount"), GetJsonInt(state, "ExitCode"), health,
+                                   GetJsonString(config, "Image"), GetJsonString(root, "Image"),
+                                   GetJsonString(state, "FinishedAt"));
+                }
+            }
+
+            var currentImages = new Dictionary<string, string>(StringComparer.Ordinal);
+            var imageRefs = details.Values.Select(v => v.Ref).Where(v => !string.IsNullOrWhiteSpace(v))
+                .Distinct(StringComparer.Ordinal).ToList();
+            if (imageRefs.Count > 0)
+            {
+                var refs = string.Join(" ", imageRefs.Select(RemoteShell.Quote));
+                try
+                {
+                    var output = await RunDockerCheckedAsync(server,
+                        $"for ref in {refs}; do printf '%s\\t' \"$ref\"; " +
+                        $"{shell.Docker(server)} image inspect --format '{{{{.Id}}}}' \"$ref\" 2>/dev/null || printf '\\n'; done",
+                        cancellationToken).ConfigureAwait(false);
+                    foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    {
+                        var fields = line.Split('\t', 2);
+                        if (fields.Length == 2) currentImages[fields[0]] = fields[1].Trim();
+                    }
+                }
+                catch { }
+            }
+
+            var fleetContainers = containers.Select(c =>
+            {
+                details.TryGetValue(c.Id, out var detail);
+                stats.TryGetValue(c.ShortId, out var stat);
+                currentImages.TryGetValue(detail.Ref ?? "", out var currentImage);
+                var imageReference = string.IsNullOrWhiteSpace(detail.Ref) ? c.Image : detail.Ref;
+                var imagePinned = imageReference.Contains("@sha256:", StringComparison.OrdinalIgnoreCase);
+                return new FleetContainerSnapshot
+                {
+                    Id = c.Id, Name = c.Name, Image = c.Image, State = c.State, Status = c.Status,
+                    Health = detail.Health ?? "", RestartCount = detail.Restarts, ExitCode = detail.Exit,
+                    ImageReference = imageReference,
+                    ImageId = detail.ImageId ?? "", CurrentImageId = currentImage ?? "",
+                    ImageUpdate = !imagePinned && !string.IsNullOrWhiteSpace(currentImage) && !string.IsNullOrWhiteSpace(detail.ImageId)
+                                  && !string.Equals(currentImage, detail.ImageId, StringComparison.Ordinal),
+                    ImagePinned = imagePinned, FinishedAt = detail.FinishedAt ?? "",
+                    Cpu = stat?.Cpu ?? "", Memory = stat?.Memory ?? "", MemoryUsage = stat?.MemoryUsage ?? ""
+                };
+            }).ToList();
+
+            var hostOutput = await shell.RunCheckedAsync(server,
+                "cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1); " +
+                "load1=$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0); " +
+                "awk -v c=\"$cpus\" -v l=\"$load1\" '/MemTotal:/{t=$2*1024}/MemAvailable:/{a=$2*1024} END{u=t-a;p=(t>0?u*100/t:0);printf \"%s\\t%s\\t%.0f\\t%.0f\\t%.2f\",c,l,t,u,p}' /proc/meminfo",
+                cancellationToken).ConfigureAwait(false);
+            var hp = hostOutput.Trim().Split('\t');
+            return new FleetHostSnapshot
+            {
+                ServerId = server.Id, ServerLabel = label, SampledAt = DateTimeOffset.Now,
+                Reachable = true, DockerOk = true, DockerVersion = (await versionTask.ConfigureAwait(false)).Trim(),
+                Containers = fleetContainers,
+                Resources = new FleetHostResources
+                {
+                    Cpus = (int)ParseLong(hp.ElementAtOrDefault(0)), Load1 = ParseDouble(hp.ElementAtOrDefault(1)),
+                    MemoryTotal = ParseLong(hp.ElementAtOrDefault(2)), MemoryUsed = ParseLong(hp.ElementAtOrDefault(3)),
+                    MemoryPercent = ParseDouble(hp.ElementAtOrDefault(4))
+                }
+            };
+        }
+        catch (Exception exception)
+        {
+            var mapped = RemoteExceptionMapper.Map(exception);
+            var reason = mapped is RemoteCommandException remote ? remote.Reason : "sample_error";
+            var reachable = reason is not ("ssh_auth" or "ssh_connect" or "no_password" or "no_private_key");
+            return new FleetHostSnapshot
+            {
+                ServerId = server.Id, ServerLabel = label, SampledAt = DateTimeOffset.Now,
+                Reachable = reachable, DockerOk = false, Reason = reason
+            };
+        }
+    }
+
     public async Task<List<DockerContainer>> ListContainersAsync(ServerProfile server, CancellationToken cancellationToken = default)
     {
         var output = await RunDockerCheckedAsync(
@@ -673,6 +785,18 @@ fi
     private static long ParseLong(string? value)
     {
         return long.TryParse(value?.Trim(), out var parsed) ? parsed : 0;
+    }
+
+    private static double ParseDouble(string? value)
+    {
+        return double.TryParse(value?.Trim(), System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
+    }
+
+    private static int GetJsonInt(JsonElement element, string name)
+    {
+        return element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value)
+            && value.TryGetInt32(out var parsed) ? parsed : 0;
     }
 
     private static void EnsureSafeFileName(string name)

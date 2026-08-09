@@ -31,6 +31,95 @@
             <label>Fetch and show CPU/memory stats</label>
             <default>false</default>
         </entry>
+        <entry name="useSystemTheme" type="Bool">
+            <label>Use Plasma system colors instead of the Dockswain palette</label>
+            <default>false</default>
+        </entry>
+        <entry name="fleetDefaultView" type="Bool">
+            <label>Open the Fleet Health overview by default</label>
+            <default>true</default>
+        </entry>
+        <entry name="fleetPollInterval" type="Int">
+            <label>Fleet health refresh interval (seconds)</label>
+            <default>30</default>
+            <min>10</min>
+        </entry>
+        <entry name="fleetDeepInterval" type="Int">
+            <label>Fleet disk and certificate refresh interval (seconds)</label>
+            <default>900</default>
+            <min>300</min>
+        </entry>
+        <entry name="fleetResourceMonitoring" type="Bool">
+            <label>Monitor container and host resource thresholds</label>
+            <default>true</default>
+        </entry>
+        <entry name="fleetDiskMonitoring" type="Bool">
+            <label>Monitor server disk pressure</label>
+            <default>true</default>
+        </entry>
+        <entry name="fleetSslMonitoring" type="Bool">
+            <label>Monitor certbot certificate expiry</label>
+            <default>true</default>
+        </entry>
+        <entry name="fleetImageMonitoring" type="Bool">
+            <label>Monitor running containers for locally updated images</label>
+            <default>true</default>
+        </entry>
+        <entry name="fleetNotifications" type="Bool">
+            <label>Show KDE notifications for fleet alerts</label>
+            <default>true</default>
+        </entry>
+        <entry name="fleetNotifyRecovery" type="Bool">
+            <label>Show notifications when a problem recovers</label>
+            <default>false</default>
+        </entry>
+        <entry name="fleetCpuThreshold" type="Int">
+            <label>Container CPU warning threshold (percent)</label>
+            <default>85</default>
+            <min>1</min>
+            <max>1000</max>
+        </entry>
+        <entry name="fleetMemoryThreshold" type="Int">
+            <label>Container and host memory warning threshold (percent)</label>
+            <default>85</default>
+            <min>1</min>
+            <max>100</max>
+        </entry>
+        <entry name="fleetDiskThreshold" type="Int">
+            <label>Server disk warning threshold (percent)</label>
+            <default>85</default>
+            <min>1</min>
+            <max>100</max>
+        </entry>
+        <entry name="fleetSslWarningDays" type="Int">
+            <label>Certificate expiry warning window (days)</label>
+            <default>14</default>
+            <min>1</min>
+        </entry>
+        <entry name="fleetRestartThreshold" type="Int">
+            <label>Restart-count warning threshold within the window</label>
+            <default>3</default>
+            <min>1</min>
+        </entry>
+        <entry name="fleetRestartWindowMinutes" type="Int">
+            <label>Restart-count alert window (minutes)</label>
+            <default>60</default>
+            <min>5</min>
+        </entry>
+        <entry name="fleetEventHistoryLimit" type="Int">
+            <label>Maximum persistent fleet events</label>
+            <default>250</default>
+            <min>50</min>
+            <max>1000</max>
+        </entry>
+        <entry name="fleetEventsJson" type="String">
+            <label>Persistent bounded Fleet Health event history</label>
+            <default>[]</default>
+        </entry>
+        <entry name="fleetStateJson" type="String">
+            <label>Last Fleet Health state used for transition detection</label>
+            <default>{}</default>
+        </entry>
         <entry name="showCompose" type="Bool">
             <label>Show docker compose projects</label>
             <default>true</default>

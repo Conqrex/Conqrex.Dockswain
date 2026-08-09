@@ -9,9 +9,9 @@ import Combine
 @MainActor
 final class AppState: ObservableObject {
     // Persisted config
-    @Published var servers: [Server] = [] { didSet { persistServers() } }
+    @Published var servers: [Server] = [] { didSet { persistServers(); configureFleet() } }
     @Published var dockerCmd: String = UserDefaults.standard.string(forKey: "dockerCmd") ?? "docker" {
-        didSet { UserDefaults.standard.set(dockerCmd, forKey: "dockerCmd"); sessions.forEach { $0.setDockerCmd(dockerCmd) } }
+        didSet { UserDefaults.standard.set(dockerCmd, forKey: "dockerCmd"); sessions.forEach { $0.setDockerCmd(dockerCmd) }; configureFleet() }
     }
     @Published var refreshInterval: Double = max(2, UserDefaults.standard.double(forKey: "refreshInterval")) {
         didSet { UserDefaults.standard.set(refreshInterval, forKey: "refreshInterval"); sessions.forEach { $0.setRefreshInterval(refreshInterval) } }
@@ -23,7 +23,7 @@ final class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(groupByNetwork, forKey: "groupByNetwork") }
     }
     @Published var nginxDir: String = UserDefaults.standard.string(forKey: "nginxDir") ?? "/etc/nginx" {
-        didSet { UserDefaults.standard.set(nginxDir, forKey: "nginxDir") }
+        didSet { UserDefaults.standard.set(nginxDir, forKey: "nginxDir"); configureFleet() }
     }
 
     // Behaviour toggles (mirror the Linux build's configGeneral)
@@ -39,6 +39,7 @@ final class AppState: ObservableObject {
         didSet {
             UserDefaults.standard.set(notificationsEnabled, forKey: "notificationsEnabled")
             if notificationsEnabled { HealthMonitor.shared.requestAuthorization() }
+            configureFleet()
         }
     }
     @Published var notifyOnStop: Bool = UDefault.bool("notifyOnStop", true) {
@@ -50,6 +51,50 @@ final class AppState: ObservableObject {
     @Published var notifyOnRestart: Bool = UDefault.bool("notifyOnRestart", true) {
         didSet { UserDefaults.standard.set(notifyOnRestart, forKey: "notifyOnRestart") }
     }
+    @Published var fleetDefaultView: Bool = UDefault.bool("fleetDefaultView", true) {
+        didSet { UserDefaults.standard.set(fleetDefaultView, forKey: "fleetDefaultView") }
+    }
+    @Published var fleetRefreshInterval: Double = UDefault.double("fleetRefreshInterval", 30) {
+        didSet { UserDefaults.standard.set(fleetRefreshInterval, forKey: "fleetRefreshInterval"); configureFleet() }
+    }
+    @Published var fleetDeepInterval: Double = UDefault.double("fleetDeepInterval", 900) {
+        didSet { UserDefaults.standard.set(fleetDeepInterval, forKey: "fleetDeepInterval"); configureFleet() }
+    }
+    @Published var fleetResourceMonitoring: Bool = UDefault.bool("fleetResourceMonitoring", true) {
+        didSet { UserDefaults.standard.set(fleetResourceMonitoring, forKey: "fleetResourceMonitoring"); configureFleet() }
+    }
+    @Published var fleetDiskMonitoring: Bool = UDefault.bool("fleetDiskMonitoring", true) {
+        didSet { UserDefaults.standard.set(fleetDiskMonitoring, forKey: "fleetDiskMonitoring"); configureFleet() }
+    }
+    @Published var fleetSslMonitoring: Bool = UDefault.bool("fleetSslMonitoring", true) {
+        didSet { UserDefaults.standard.set(fleetSslMonitoring, forKey: "fleetSslMonitoring"); configureFleet() }
+    }
+    @Published var fleetImageMonitoring: Bool = UDefault.bool("fleetImageMonitoring", true) {
+        didSet { UserDefaults.standard.set(fleetImageMonitoring, forKey: "fleetImageMonitoring"); configureFleet() }
+    }
+    // Existing macOS health alerts included container recovery, so retain that
+    // behavior for users without a stored fleet-specific preference.
+    @Published var fleetNotifyRecovery: Bool = UDefault.bool("fleetNotifyRecovery", true) {
+        didSet { UserDefaults.standard.set(fleetNotifyRecovery, forKey: "fleetNotifyRecovery"); configureFleet() }
+    }
+    @Published var fleetCpuThreshold: Int = UDefault.int("fleetCpuThreshold", 85) {
+        didSet { UserDefaults.standard.set(fleetCpuThreshold, forKey: "fleetCpuThreshold"); configureFleet() }
+    }
+    @Published var fleetMemoryThreshold: Int = UDefault.int("fleetMemoryThreshold", 85) {
+        didSet { UserDefaults.standard.set(fleetMemoryThreshold, forKey: "fleetMemoryThreshold"); configureFleet() }
+    }
+    @Published var fleetDiskThreshold: Int = UDefault.int("fleetDiskThreshold", 85) {
+        didSet { UserDefaults.standard.set(fleetDiskThreshold, forKey: "fleetDiskThreshold"); configureFleet() }
+    }
+    @Published var fleetSslDays: Int = UDefault.int("fleetSslDays", 14) {
+        didSet { UserDefaults.standard.set(fleetSslDays, forKey: "fleetSslDays"); configureFleet() }
+    }
+    @Published var fleetRestartThreshold: Int = UDefault.int("fleetRestartThreshold", 3) {
+        didSet { UserDefaults.standard.set(fleetRestartThreshold, forKey: "fleetRestartThreshold"); configureFleet() }
+    }
+    @Published var fleetRestartWindow: Int = UDefault.int("fleetRestartWindow", 60) {
+        didSet { UserDefaults.standard.set(fleetRestartWindow, forKey: "fleetRestartWindow"); configureFleet() }
+    }
     @Published var hideExitedDefault: Bool = UserDefaults.standard.bool(forKey: "hideExitedDefault") {
         didSet { UserDefaults.standard.set(hideExitedDefault, forKey: "hideExitedDefault") }
     }
@@ -57,7 +102,7 @@ final class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(timeFormat24h, forKey: "timeFormat24h") }
     }
     @Published var sshConnectTimeout: Int = UDefault.int("sshConnectTimeout", 5) {
-        didSet { UserDefaults.standard.set(sshConnectTimeout, forKey: "sshConnectTimeout") }
+        didSet { UserDefaults.standard.set(sshConnectTimeout, forKey: "sshConnectTimeout"); configureFleet() }
     }
     @Published var statsInterval: Double = UDefault.double("statsInterval", 2) {
         didSet { UserDefaults.standard.set(statsInterval, forKey: "statsInterval"); sessions.forEach { $0.setStatsInterval(statsInterval) } }
@@ -110,7 +155,11 @@ final class AppState: ObservableObject {
     /// Active external-editor sessions with live save-back to the server.
     let editor = ExternalEditManager()
 
+    /// All-configured-server operational monitor (independent of open tabs).
+    let fleet = FleetMonitor()
+
     private var sessionCancellables: [UUID: AnyCancellable] = [:]
+    private var fleetCancellable: AnyCancellable?
 
     var active: ServerSession? { sessions.first { $0.id == activeID } }
     var selectedServer: Server? { active?.server }
@@ -129,7 +178,7 @@ final class AppState: ObservableObject {
 
     /// Any open server has an unhealthy or restart-looping container — drives the
     /// menu-bar warning marker so a problem is visible without opening the panel.
-    var hasAlerts: Bool { sessions.contains { $0.hasAlerts } }
+    var hasAlerts: Bool { fleet.criticalCount > 0 || fleet.warningCount > 0 }
 
     /// Configured servers that aren't open yet (for the "+" menu).
     var unopenedServers: [Server] { servers.filter { s in !sessions.contains { $0.id == s.id } } }
@@ -201,6 +250,20 @@ final class AppState: ObservableObject {
         if refreshInterval < 2 { refreshInterval = 5 }
         runningOnly = hideExitedDefault       // start filtered if the user set that default
         restoreOpenTabs()
+        fleetCancellable = fleet.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
+        configureFleet()
+    }
+
+    private func configureFleet() {
+        let cfg = FleetSettings(refreshInterval: max(10, fleetRefreshInterval),
+            deepInterval: max(300, fleetDeepInterval), resources: fleetResourceMonitoring,
+            disk: fleetDiskMonitoring, ssl: fleetSslMonitoring, images: fleetImageMonitoring,
+            notifications: notificationsEnabled, notifyRecovery: fleetNotifyRecovery,
+            cpuThreshold: fleetCpuThreshold, memoryThreshold: fleetMemoryThreshold,
+            diskThreshold: fleetDiskThreshold, sslDays: fleetSslDays,
+            restartThreshold: fleetRestartThreshold, restartWindowMinutes: fleetRestartWindow,
+            historyLimit: 250)
+        fleet.configure(servers: servers, settings: cfg) { [weak self] in self?.makeBackend() ?? Backend() }
     }
 
     // MARK: - Persistence

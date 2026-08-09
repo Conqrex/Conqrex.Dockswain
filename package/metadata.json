@@ -2,7 +2,7 @@
     "KPlugin": {
         "Id": "com.conqrex.dockswain",
         "Name": "Dockswain",
-        "Description": "Manage Docker on a remote server over SSH: live container list, start/stop/restart, logs, exec, and compose up/down. Plus an SFTP file manager (dual-pane, drag-drop, sync) and nginx site creation with certbot SSL.",
+        "Description": "Fleet health and Docker management over SSH: alerts, event history, containers, Compose, disk cleanup, SFTP, nginx, and certbot SSL.",
         "Icon": "network-server",
         "Category": "System Information",
         "License": "MIT",

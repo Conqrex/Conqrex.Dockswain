@@ -135,14 +135,52 @@ struct SettingsView: View {
 
                 Divider().padding(.vertical, 4)
 
-                // Health & notifications
-                Text("HEALTH & NOTIFICATIONS").font(.caption).foregroundStyle(.secondary)
-                Toggle("Notify on container health changes", isOn: $state.notificationsEnabled)
+                // Fleet Health
+                Text("FLEET HEALTH & NOTIFICATIONS").font(.caption).foregroundStyle(.secondary)
+                Toggle("Open Fleet Health by default", isOn: $state.fleetDefaultView)
+                HStack {
+                    Text("Health refresh every")
+                    Spacer()
+                    Stepper("\(Int(state.fleetRefreshInterval))s", value: $state.fleetRefreshInterval, in: 10...600, step: 5)
+                        .frame(width: 120)
+                }
+                HStack {
+                    Text("Disk / SSL refresh every")
+                    Spacer()
+                    Stepper("\(Int(state.fleetDeepInterval / 60))m", value: $state.fleetDeepInterval, in: 300...21600, step: 300)
+                        .frame(width: 120)
+                }
+                Toggle("Monitor CPU and memory thresholds", isOn: $state.fleetResourceMonitoring)
+                if state.fleetResourceMonitoring {
+                    HStack {
+                        Text("CPU / memory warning")
+                        Spacer()
+                        Stepper("\(state.fleetCpuThreshold)% CPU (100% = one core)", value: $state.fleetCpuThreshold, in: 1...1000)
+                        Stepper("\(state.fleetMemoryThreshold)% memory", value: $state.fleetMemoryThreshold, in: 1...100)
+                    }
+                }
+                Toggle("Monitor disk pressure", isOn: $state.fleetDiskMonitoring)
+                if state.fleetDiskMonitoring {
+                    Stepper("Warn at \(state.fleetDiskThreshold)% disk", value: $state.fleetDiskThreshold, in: 1...100)
+                }
+                Toggle("Monitor certificate expiry", isOn: $state.fleetSslMonitoring)
+                if state.fleetSslMonitoring {
+                    Stepper("Warn within \(state.fleetSslDays) days", value: $state.fleetSslDays, in: 1...180)
+                }
+                Toggle("Detect locally updated container images", isOn: $state.fleetImageMonitoring)
+                HStack {
+                    Text("Restart burst")
+                    Spacer()
+                    Stepper("\(state.fleetRestartThreshold) restarts", value: $state.fleetRestartThreshold, in: 1...100)
+                    Stepper("\(state.fleetRestartWindow) min", value: $state.fleetRestartWindow, in: 5...1440, step: 5)
+                }
+                Toggle("Show macOS notifications for fleet changes", isOn: $state.notificationsEnabled)
                 if state.notificationsEnabled {
-                    Toggle("Stopped or crashed", isOn: $state.notifyOnStop)
+                    Toggle("Stopped or crashed containers", isOn: $state.notifyOnStop)
                     Toggle("Became unhealthy / recovered", isOn: $state.notifyOnUnhealthy)
-                    Toggle("Restart-looping", isOn: $state.notifyOnRestart)
-                    Text("Watches every open server tab. macOS may ask for notification permission the first time.")
+                    Toggle("Restart-count / restarting alerts", isOn: $state.notifyOnRestart)
+                    Toggle("Also notify when problems recover", isOn: $state.fleetNotifyRecovery)
+                    Text("Watches every configured server. macOS may ask for notification permission the first time.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 

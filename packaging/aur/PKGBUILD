@@ -4,11 +4,11 @@ pkgname=dockswain
 _id=com.conqrex.dockswain
 pkgver=0.8.5
 pkgrel=1
-pkgdesc='KDE Plasma 6 widget to manage Docker on a remote host over SSH (containers, logs, compose, SFTP, nginx)'
+pkgdesc='KDE Plasma 6 fleet health and Docker management widget over SSH'
 arch=('any')
 url='https://github.com/SancaK9/Conqrex.Dockswain'
 license=('MIT')
-depends=('plasma-workspace' 'prison' 'jq' 'openssh')
+depends=('plasma-workspace' 'prison' 'jq' 'openssh' 'libnotify')
 optdepends=('sshpass: password (non-key) SSH authentication'
             'libsecret: keep passwords in the keyring (secret-tool)'
             'rsync: faster file transfers with live progress'
