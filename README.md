@@ -234,11 +234,11 @@ Contributions are welcome—issues and pull requests alike.
   renew anything automatically.
 - Mobile QR exports exclude credentials unless you explicitly opt in.
 
-## 🐙 Sibling project
+## 🛰️ Sibling projects
 
-[**Conqrex.OctoPulse**](https://github.com/Conqrex/Conqrex.OctoPulse) follows
-GitHub Actions across your repositories and organizations from one KDE Plasma
-widget, with live status, logs, re-run, cancel, and workflow dispatch.
+- [**OctoPulse**](https://github.com/Conqrex/Conqrex.OctoPulse) — GitHub Actions across your repositories and organizations, with live status, logs, re-run, cancel, and workflow dispatch.
+- [**CrewBeacon**](https://github.com/Conqrex/Conqrex.CrewBeacon) — AI quota, live local and remote coding agents, and repository usage history.
+- [**MemoKeel**](https://github.com/Conqrex/Conqrex.MemoKeel) — notes, to-dos, kanban and reminders in one local-first panel popup.
 
 ## ☕ Support
 
