@@ -90,7 +90,13 @@ Right-click your desktop or panel → **Add Widgets** → search **Dockswain**.
 
 ### Arch Linux / CachyOS
 
-Add the hosted repository to `/etc/pacman.conf`:
+Install from the AUR:
+
+```sh
+yay -S dockswain
+```
+
+Or add the hosted repository to `/etc/pacman.conf`:
 
 ```ini
 [dockswain]
